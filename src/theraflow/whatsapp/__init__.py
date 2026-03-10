@@ -1,7 +1,20 @@
-"""WhatsApp Cloud API integration layer."""
+"""WhatsApp Cloud API integration layer.
 
-from fastapi import APIRouter
+Exports
+-------
+router
+    FastAPI ``APIRouter`` mounted at ``/webhook/whatsapp``.  Include this in
+    the top-level FastAPI application::
 
-# Routes are registered in the sub-modules that will be added in subsequent
-# tasks (webhook handler, message sender, etc.).
-router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
+        from theraflow.whatsapp import router as whatsapp_router
+        app.include_router(whatsapp_router)
+
+sender
+    Async helpers for sending outbound messages:
+    :func:`~theraflow.whatsapp.sender.send_text_message` and
+    :func:`~theraflow.whatsapp.sender.send_button_message`.
+"""
+
+from theraflow.whatsapp.webhook import router
+
+__all__ = ["router"]
