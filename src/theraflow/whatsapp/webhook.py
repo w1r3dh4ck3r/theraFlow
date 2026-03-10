@@ -219,32 +219,42 @@ async def receive_webhook(
     engine: ConversationEngine = request.app.state.engine
 
     for message in messages:
-        msg_type = message.get("type")
-        sender: str | None = message.get("from")
-        name: str = contact_names.get(sender or "", "")
+        try:
+            msg_type = message.get("type")
+            sender: str | None = message.get("from")
+            name: str = contact_names.get(sender or "", "")
 
-        if msg_type == "text":
-            text: str = message.get("text", {}).get("body", "")
-            log.info(
-                "whatsapp_inbound_text",
-                sender=sender,
-                length=len(text),
+            if msg_type == "text":
+                text: str = message.get("text", {}).get("body", "")
+                log.info(
+                    "whatsapp_inbound_text",
+                    sender=sender,
+                    length=len(text),
+                )
+                await _dispatch(engine=engine, sender=sender, name=name, text=text, button_payload=None)
+
+            elif msg_type == "interactive":
+                interactive = message.get("interactive", {})
+                button_reply: dict[str, Any] = interactive.get("button_reply", {})
+                log.info(
+                    "whatsapp_inbound_button_reply",
+                    sender=sender,
+                    button_id=button_reply.get("id"),
+                    button_title=button_reply.get("title"),
+                )
+                await _dispatch(engine=engine, sender=sender, name=name, text=None, button_payload=button_reply)
+
+            else:
+                log.debug("whatsapp_inbound_type_ignored", sender=sender, msg_type=msg_type)
+
+        except Exception:
+            log.exception(
+                "webhook_processing_error",
+                message_id=message.get("id"),
+                sender=message.get("from"),
+                msg_type=message.get("type"),
             )
-            await _dispatch(engine=engine, sender=sender, name=name, text=text, button_payload=None)
-
-        elif msg_type == "interactive":
-            interactive = message.get("interactive", {})
-            button_reply: dict[str, Any] = interactive.get("button_reply", {})
-            log.info(
-                "whatsapp_inbound_button_reply",
-                sender=sender,
-                button_id=button_reply.get("id"),
-                button_title=button_reply.get("title"),
-            )
-            await _dispatch(engine=engine, sender=sender, name=name, text=None, button_payload=button_reply)
-
-        else:
-            log.debug("whatsapp_inbound_type_ignored", sender=sender, msg_type=msg_type)
+            continue
 
     return {"status": "ok"}
 
