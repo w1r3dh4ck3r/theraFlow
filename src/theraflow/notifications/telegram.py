@@ -8,7 +8,7 @@ Typical usage::
     from theraflow.notifications.telegram import TelegramNotifier
     from theraflow.config import settings
 
-    notifier = TelegramNotifier()
+    notifier = TelegramNotifier(http_client=client)
     await notifier.send_lead_notification(lead)
 """
 
@@ -35,9 +35,15 @@ class TelegramNotifier:
     The notifier intentionally swallows all errors so that a Telegram outage
     or misconfiguration never crashes the lead-processing flow.  All
     outcomes are recorded with structlog.
+
+    Args:
+        http_client: A shared :class:`httpx.AsyncClient` instance managed by
+            the application lifespan.  Reusing a single client improves
+            connection-pool efficiency.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, http_client: httpx.AsyncClient) -> None:
+        self._http_client: httpx.AsyncClient = http_client
         self._bot_token: str = settings.telegram_bot_token
         self._chat_id: str = settings.telegram_chat_id
         self._send_url: str = (
@@ -139,6 +145,5 @@ class TelegramNotifier:
             "parse_mode": "HTML",
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(self._send_url, json=payload)
-            response.raise_for_status()
+        response = await self._http_client.post(self._send_url, json=payload)
+        response.raise_for_status()

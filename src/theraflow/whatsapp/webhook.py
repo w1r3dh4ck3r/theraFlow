@@ -15,6 +15,7 @@ import hashlib
 import hmac
 from typing import Annotated, Any
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse
 
@@ -218,6 +219,7 @@ async def receive_webhook(
 
     contact_names = _extract_contact_names(payload)
     engine: ConversationEngine = request.app.state.engine
+    http_client: httpx.AsyncClient = request.app.state.http_client
 
     for message in messages:
         try:
@@ -232,7 +234,14 @@ async def receive_webhook(
                     sender=mask_phone(sender),
                     length=len(text),
                 )
-                await _dispatch(engine=engine, sender=sender, name=name, text=text, button_payload=None)
+                await _dispatch(
+                    engine=engine,
+                    sender=sender,
+                    name=name,
+                    text=text,
+                    button_payload=None,
+                    http_client=http_client,
+                )
 
             elif msg_type == "interactive":
                 interactive = message.get("interactive", {})
@@ -243,7 +252,14 @@ async def receive_webhook(
                     button_id=button_reply.get("id"),
                     button_title=button_reply.get("title"),
                 )
-                await _dispatch(engine=engine, sender=sender, name=name, text=None, button_payload=button_reply)
+                await _dispatch(
+                    engine=engine,
+                    sender=sender,
+                    name=name,
+                    text=None,
+                    button_payload=button_reply,
+                    http_client=http_client,
+                )
 
             else:
                 log.debug("whatsapp_inbound_type_ignored", sender=mask_phone(sender), msg_type=msg_type)
@@ -272,6 +288,7 @@ async def _dispatch(
     name: str,
     text: str | None,
     button_payload: dict[str, Any] | None,
+    http_client: httpx.AsyncClient,
 ) -> None:
     """Forward a parsed inbound message to the conversation engine.
 
@@ -288,6 +305,7 @@ async def _dispatch(
         text: Message body for plain-text messages; ``None`` for button replies.
         button_payload: Parsed ``button_reply`` dict for interactive messages;
             ``None`` for plain-text messages.
+        http_client: Shared :class:`httpx.AsyncClient` from ``app.state``.
     """
     if not sender:
         log.warning("whatsapp_dispatch_no_sender")
@@ -310,8 +328,8 @@ async def _dispatch(
     for msg in outgoing:
         try:
             if msg.is_interactive:
-                await send_button_message(sender, msg.text, msg.buttons)
+                await send_button_message(sender, msg.text, msg.buttons, http_client=http_client)
             else:
-                await send_text_message(sender, msg.text)
+                await send_text_message(sender, msg.text, http_client=http_client)
         except Exception:
             log.exception("whatsapp_send_failed", sender=mask_phone(sender))

@@ -11,6 +11,7 @@ import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 
 from theraflow import __version__
@@ -48,11 +49,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     configure_logging()
 
-    sheets_client = SheetsClient(
-        service_account_json=settings.google_service_account_json,
-        sheet_id=settings.google_sheets_id,
-    )
-    telegram_notifier = TelegramNotifier()
+    http_client = httpx.AsyncClient()
+    app.state.http_client = http_client
+
+    sheets_client = None
+    try:
+        sheets_client = SheetsClient(
+            service_account_json=settings.google_service_account_json,
+            sheet_id=settings.google_sheets_id,
+        )
+    except Exception:
+        pass  # Sheets unavailable — leads won't be persisted
+
+    telegram_notifier = TelegramNotifier(http_client=http_client)
     engine = ConversationEngine(
         sheets_client=sheets_client,
         telegram_notifier=telegram_notifier,
@@ -71,6 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         "theraflow_stopped",
         active_sessions_discarded=active_sessions,
     )
+    await http_client.aclose()
 
 
 app = FastAPI(
