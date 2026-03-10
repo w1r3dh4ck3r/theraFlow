@@ -21,6 +21,7 @@ from fastapi.responses import PlainTextResponse
 from theraflow.config import settings
 from theraflow.conversation.engine import ConversationEngine, OutgoingMessage
 from theraflow.logging import get_logger
+from theraflow.utils import mask_phone
 from theraflow.whatsapp.sender import send_button_message, send_text_message
 
 log = get_logger(__name__)
@@ -228,7 +229,7 @@ async def receive_webhook(
                 text: str = message.get("text", {}).get("body", "")
                 log.info(
                     "whatsapp_inbound_text",
-                    sender=sender,
+                    sender=mask_phone(sender),
                     length=len(text),
                 )
                 await _dispatch(engine=engine, sender=sender, name=name, text=text, button_payload=None)
@@ -238,20 +239,20 @@ async def receive_webhook(
                 button_reply: dict[str, Any] = interactive.get("button_reply", {})
                 log.info(
                     "whatsapp_inbound_button_reply",
-                    sender=sender,
+                    sender=mask_phone(sender),
                     button_id=button_reply.get("id"),
                     button_title=button_reply.get("title"),
                 )
                 await _dispatch(engine=engine, sender=sender, name=name, text=None, button_payload=button_reply)
 
             else:
-                log.debug("whatsapp_inbound_type_ignored", sender=sender, msg_type=msg_type)
+                log.debug("whatsapp_inbound_type_ignored", sender=mask_phone(sender), msg_type=msg_type)
 
         except Exception:
             log.exception(
                 "webhook_processing_error",
                 message_id=message.get("id"),
-                sender=message.get("from"),
+                sender=mask_phone(message.get("from")),
                 msg_type=message.get("type"),
             )
             continue
@@ -294,7 +295,7 @@ async def _dispatch(
 
     log.debug(
         "whatsapp_dispatch",
-        sender=sender,
+        sender=mask_phone(sender),
         text=text,
         button_payload=button_payload,
     )
@@ -313,4 +314,4 @@ async def _dispatch(
             else:
                 await send_text_message(sender, msg.text)
         except Exception:
-            log.exception("whatsapp_send_failed", sender=sender)
+            log.exception("whatsapp_send_failed", sender=mask_phone(sender))

@@ -22,6 +22,7 @@ import httpx
 
 from theraflow.config import settings
 from theraflow.logging import get_logger
+from theraflow.utils import mask_phone
 
 log = get_logger(__name__)
 
@@ -69,7 +70,7 @@ async def send_text_message(phone: str, text: str) -> None:
         },
     }
 
-    log.info("whatsapp_send_text", phone=phone, length=len(text))
+    log.info("whatsapp_send_text", phone=mask_phone(phone), length=len(text))
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -79,7 +80,7 @@ async def send_text_message(phone: str, text: str) -> None:
         )
         response.raise_for_status()
 
-    log.debug("whatsapp_send_text_ok", phone=phone, status_code=response.status_code)
+    log.debug("whatsapp_send_text_ok", phone=mask_phone(phone), status_code=response.status_code)
 
 
 async def send_button_message(
@@ -139,7 +140,7 @@ async def send_button_message(
         },
     }
 
-    log.info("whatsapp_send_buttons", phone=phone, button_count=len(buttons))
+    log.info("whatsapp_send_buttons", phone=mask_phone(phone), button_count=len(buttons))
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -151,6 +152,6 @@ async def send_button_message(
 
     log.debug(
         "whatsapp_send_buttons_ok",
-        phone=phone,
+        phone=mask_phone(phone),
         status_code=response.status_code,
     )

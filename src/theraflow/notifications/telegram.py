@@ -19,6 +19,7 @@ import httpx
 from theraflow.config import settings
 from theraflow.logging import get_logger
 from theraflow.sheets.client import LeadData, calculate_score
+from theraflow.utils import mask_phone
 
 log = get_logger(__name__)
 
@@ -64,7 +65,7 @@ class TelegramNotifier:
         log.info(
             "telegram_notify_attempt",
             lead_id=lead.lead_id,
-            phone=lead.phone_number,
+            phone=mask_phone(lead.phone_number),
             score=lead.score,
             priority=priority,
         )
@@ -94,7 +95,7 @@ class TelegramNotifier:
             log.info(
                 "telegram_notify_ok",
                 lead_id=lead.lead_id,
-                phone=lead.phone_number,
+                phone=mask_phone(lead.phone_number),
             )
 
     # ------------------------------------------------------------------
