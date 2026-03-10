@@ -48,6 +48,13 @@ from theraflow.logging import get_logger
 from theraflow.sheets.client import LeadData, calculate_score
 from theraflow.utils import mask_phone
 
+# ---------------------------------------------------------------------------
+# Session-store limits
+# ---------------------------------------------------------------------------
+
+MAX_SESSIONS = 1000
+SESSION_TTL_SECONDS = 1800  # 30 minutes
+
 if TYPE_CHECKING:
     from theraflow.notifications.telegram import TelegramNotifier
     from theraflow.sheets.client import SheetsClient
@@ -194,6 +201,7 @@ class ConversationEngine:
         # New contact — create session and return the greeting prompt
         # ----------------------------------------------------------------
         if session is None:
+            self._evict_stale_sessions()
             session = UserSession(
                 phone=phone,
                 whatsapp_name=name,
@@ -312,6 +320,35 @@ class ConversationEngine:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _evict_stale_sessions(self) -> None:
+        """Remove TTL-expired sessions, then enforce the MAX_SESSIONS cap.
+
+        Called once before each new session is created so that stale entries
+        are cleaned up lazily rather than via a background timer.
+
+        Eviction order:
+        1. Remove every session whose ``created_at`` is older than
+           :data:`SESSION_TTL_SECONDS` seconds ago.
+        2. If the store still holds >= :data:`MAX_SESSIONS` entries, drop the
+           single oldest session (LRU by ``created_at``) to make room.
+        """
+        cutoff = datetime.now(UTC).timestamp() - SESSION_TTL_SECONDS
+        stale_keys = [
+            phone
+            for phone, session in self._sessions.items()
+            if session.created_at.timestamp() < cutoff
+        ]
+        for phone in stale_keys:
+            self._sessions.pop(phone, None)
+            log.info("conversation_session_ttl_evicted", phone=phone)
+
+        if len(self._sessions) >= MAX_SESSIONS:
+            oldest_phone = min(
+                self._sessions, key=lambda p: self._sessions[p].created_at
+            )
+            self._sessions.pop(oldest_phone)
+            log.info("conversation_session_lru_evicted", phone=oldest_phone)
 
     def _build_prompt(self, step: Step) -> list[OutgoingMessage]:
         """Build the outgoing message(s) for a given step.
