@@ -190,7 +190,7 @@ class SheetsClient:
     """
 
     def __init__(self, service_account_json: str, sheet_id: str) -> None:
-        """Initialise the client and load service account credentials.
+        """Initialise the client, load credentials, and cache the worksheet.
 
         Args:
             service_account_json: Absolute or relative path to the Google
@@ -205,6 +205,8 @@ class SheetsClient:
                 scopes=_SCOPES,
             )
         )
+        self._gc = gspread.authorize(self._credentials)
+        self._worksheet = self._gc.open_by_key(self._sheet_id).sheet1
         log.info(
             "sheets_client_initialized",
             sheet_id=sheet_id,
@@ -215,8 +217,21 @@ class SheetsClient:
     # Private helpers (synchronous — run in executor)
     # ------------------------------------------------------------------
 
+    def _reauthorize(self) -> None:
+        """Re-authorize gspread and refresh the cached worksheet.
+
+        Called automatically by :meth:`_append_row` when an
+        :class:`gspread.exceptions.APIError` suggests the token has expired.
+        """
+        self._gc = gspread.authorize(self._credentials)
+        self._worksheet = self._gc.open_by_key(self._sheet_id).sheet1
+
     def _append_row(self, row: list[str | int]) -> None:
         """Synchronously append *row* to the first worksheet.
+
+        Uses the cached :attr:`_worksheet`.  On a
+        :class:`gspread.exceptions.APIError` (e.g. token expiry) the client
+        re-authorises once and retries before propagating the error.
 
         This method is **blocking** and must always be called via
         :meth:`write_lead` (which runs it in a thread executor).
@@ -224,9 +239,12 @@ class SheetsClient:
         Args:
             row: Ordered list of cell values matching :data:`COLUMNS`.
         """
-        gc = gspread.authorize(self._credentials)
-        worksheet = gc.open_by_key(self._sheet_id).sheet1
-        worksheet.append_row(row, value_input_option="USER_ENTERED")
+        try:
+            self._worksheet.append_row(row, value_input_option="USER_ENTERED")
+        except gspread.exceptions.APIError:
+            log.warning("sheets_reauthorizing", reason="APIError on append_row")
+            self._reauthorize()
+            self._worksheet.append_row(row, value_input_option="USER_ENTERED")
 
     # ------------------------------------------------------------------
     # Public async API
