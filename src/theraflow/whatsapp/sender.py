@@ -1,18 +1,19 @@
 """WhatsApp Cloud API message sender.
 
 Provides async helpers for sending outbound messages via the Meta WhatsApp
-Cloud API (v21.0).  All functions share a single ``httpx.AsyncClient`` per
-call and log every send with structlog.
+Cloud API (v21.0).  All functions accept a shared ``httpx.AsyncClient`` and
+log every send with structlog.
 
 Usage::
 
     from theraflow.whatsapp.sender import send_text_message, send_button_message
 
-    await send_text_message("+15551234567", "Hello!")
+    await send_text_message("+15551234567", "Hello!", http_client=client)
     await send_button_message(
         "+15551234567",
         body_text="Are you ready?",
         buttons=[{"id": "yes", "title": "Yes"}, {"id": "no", "title": "No"}],
+        http_client=client,
     )
 """
 
@@ -22,6 +23,7 @@ import httpx
 
 from theraflow.config import settings
 from theraflow.logging import get_logger
+from theraflow.utils import mask_phone
 
 log = get_logger(__name__)
 
@@ -47,13 +49,20 @@ def _auth_headers() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-async def send_text_message(phone: str, text: str) -> None:
+async def send_text_message(
+    phone: str,
+    text: str,
+    *,
+    http_client: httpx.AsyncClient,
+) -> None:
     """Send a plain-text WhatsApp message.
 
     Args:
         phone: Recipient's phone number in E.164 format without the leading
             ``+`` (e.g. ``"15551234567"``), as required by the Cloud API.
         text: Message body (up to 4096 characters).
+        http_client: A shared :class:`httpx.AsyncClient` instance managed by
+            the application lifespan.
 
     Raises:
         httpx.HTTPStatusError: If the Cloud API returns a non-2xx response.
@@ -69,23 +78,24 @@ async def send_text_message(phone: str, text: str) -> None:
         },
     }
 
-    log.info("whatsapp_send_text", phone=phone, length=len(text))
+    log.info("whatsapp_send_text", phone=mask_phone(phone), length=len(text))
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            _messages_url(),
-            json=payload,
-            headers=_auth_headers(),
-        )
-        response.raise_for_status()
+    response = await http_client.post(
+        _messages_url(),
+        json=payload,
+        headers=_auth_headers(),
+    )
+    response.raise_for_status()
 
-    log.debug("whatsapp_send_text_ok", phone=phone, status_code=response.status_code)
+    log.debug("whatsapp_send_text_ok", phone=mask_phone(phone), status_code=response.status_code)
 
 
 async def send_button_message(
     phone: str,
     body_text: str,
     buttons: list[dict],
+    *,
+    http_client: httpx.AsyncClient,
 ) -> None:
     """Send an interactive reply-button message.
 
@@ -112,6 +122,8 @@ async def send_button_message(
                 ]
 
             The Cloud API accepts a maximum of **3** buttons per message.
+        http_client: A shared :class:`httpx.AsyncClient` instance managed by
+            the application lifespan.
 
     Raises:
         httpx.HTTPStatusError: If the Cloud API returns a non-2xx response.
@@ -139,18 +151,17 @@ async def send_button_message(
         },
     }
 
-    log.info("whatsapp_send_buttons", phone=phone, button_count=len(buttons))
+    log.info("whatsapp_send_buttons", phone=mask_phone(phone), button_count=len(buttons))
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            _messages_url(),
-            json=payload,
-            headers=_auth_headers(),
-        )
-        response.raise_for_status()
+    response = await http_client.post(
+        _messages_url(),
+        json=payload,
+        headers=_auth_headers(),
+    )
+    response.raise_for_status()
 
     log.debug(
         "whatsapp_send_buttons_ok",
-        phone=phone,
+        phone=mask_phone(phone),
         status_code=response.status_code,
     )

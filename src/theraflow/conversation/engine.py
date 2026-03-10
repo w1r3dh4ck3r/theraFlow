@@ -46,6 +46,14 @@ from theraflow.conversation.flow import (
 )
 from theraflow.logging import get_logger
 from theraflow.sheets.client import LeadData, calculate_score
+from theraflow.utils import mask_phone
+
+# ---------------------------------------------------------------------------
+# Session-store limits
+# ---------------------------------------------------------------------------
+
+MAX_SESSIONS = 1000
+SESSION_TTL_SECONDS = 1800  # 30 minutes
 
 if TYPE_CHECKING:
     from theraflow.notifications.telegram import TelegramNotifier
@@ -193,6 +201,7 @@ class ConversationEngine:
         # New contact — create session and return the greeting prompt
         # ----------------------------------------------------------------
         if session is None:
+            self._evict_stale_sessions()
             session = UserSession(
                 phone=phone,
                 whatsapp_name=name,
@@ -202,7 +211,7 @@ class ConversationEngine:
             self._sessions[phone] = session
             log.info(
                 "conversation_session_created",
-                phone=phone,
+                phone=mask_phone(phone),
                 name=name,
             )
             return self._build_prompt(Step.GREETING)
@@ -214,7 +223,7 @@ class ConversationEngine:
         if current in (Step.CLOSING, Step.HUMAN_HANDOFF):
             log.debug(
                 "conversation_message_after_terminal",
-                phone=phone,
+                phone=mask_phone(phone),
                 step=current,
             )
             return []
@@ -243,7 +252,7 @@ class ConversationEngine:
         if answer is None and not config.accepts_free_text:
             log.debug(
                 "conversation_invalid_input",
-                phone=phone,
+                phone=mask_phone(phone),
                 step=current,
                 text=text,
                 button_id=button_id,
@@ -254,7 +263,7 @@ class ConversationEngine:
         # Special branch: human handoff (GREETING → "Prefiro falar com uma pessoa")
         # ----------------------------------------------------------------
         if current == Step.GREETING and answer == HUMAN_HANDOFF_OPTION:
-            log.info("conversation_human_handoff", phone=phone)
+            log.info("conversation_human_handoff", phone=mask_phone(phone))
             self._cleanup_session(phone)
             return [OutgoingMessage(text=HUMAN_HANDOFF_MESSAGE)]
 
@@ -262,7 +271,7 @@ class ConversationEngine:
         # Special branch: LGPD consent declined (CONSENT → "Não")
         # ----------------------------------------------------------------
         if current == Step.CONSENT and answer == LGPD_DECLINE_OPTION:
-            log.info("conversation_lgpd_declined", phone=phone)
+            log.info("conversation_lgpd_declined", phone=mask_phone(phone))
             self._cleanup_session(phone)
             return [OutgoingMessage(text=LGPD_DECLINED_MESSAGE)]
 
@@ -273,7 +282,7 @@ class ConversationEngine:
             session.collected_data[config.data_key] = answer
             log.debug(
                 "conversation_answer_stored",
-                phone=phone,
+                phone=mask_phone(phone),
                 step=current,
                 key=config.data_key,
                 value=answer,
@@ -285,14 +294,14 @@ class ConversationEngine:
         advance_to: Step | None = next_step(current)
         if advance_to is None:
             # Already at the final step — clean up defensively.
-            log.warning("conversation_no_next_step", phone=phone, step=current)
+            log.warning("conversation_no_next_step", phone=mask_phone(phone), step=current)
             self._cleanup_session(phone)
             return []
 
         session.current_step = advance_to
         log.info(
             "conversation_step_advanced",
-            phone=phone,
+            phone=mask_phone(phone),
             from_step=current,
             to_step=advance_to,
         )
@@ -311,6 +320,35 @@ class ConversationEngine:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _evict_stale_sessions(self) -> None:
+        """Remove TTL-expired sessions, then enforce the MAX_SESSIONS cap.
+
+        Called once before each new session is created so that stale entries
+        are cleaned up lazily rather than via a background timer.
+
+        Eviction order:
+        1. Remove every session whose ``created_at`` is older than
+           :data:`SESSION_TTL_SECONDS` seconds ago.
+        2. If the store still holds >= :data:`MAX_SESSIONS` entries, drop the
+           single oldest session (LRU by ``created_at``) to make room.
+        """
+        cutoff = datetime.now(UTC).timestamp() - SESSION_TTL_SECONDS
+        stale_keys = [
+            phone
+            for phone, session in self._sessions.items()
+            if session.created_at.timestamp() < cutoff
+        ]
+        for phone in stale_keys:
+            self._sessions.pop(phone, None)
+            log.info("conversation_session_ttl_evicted", phone=phone)
+
+        if len(self._sessions) >= MAX_SESSIONS:
+            oldest_phone = min(
+                self._sessions, key=lambda p: self._sessions[p].created_at
+            )
+            self._sessions.pop(oldest_phone)
+            log.info("conversation_session_lru_evicted", phone=oldest_phone)
 
     def _build_prompt(self, step: Step) -> list[OutgoingMessage]:
         """Build the outgoing message(s) for a given step.
@@ -338,7 +376,7 @@ class ConversationEngine:
     def _cleanup_session(self, phone: str) -> None:
         """Remove the active session for *phone*, if any."""
         self._sessions.pop(phone, None)
-        log.info("conversation_session_cleaned", phone=phone)
+        log.info("conversation_session_cleaned", phone=mask_phone(phone))
 
     async def _on_conversation_complete(self, session: UserSession) -> None:
         """Hook called when a contact completes the flow and gives LGPD consent.
@@ -383,7 +421,7 @@ class ConversationEngine:
 
         log.info(
             "conversation_complete",
-            phone=session.phone,
+            phone=mask_phone(session.phone),
             lead_id=lead.lead_id,
             score=score,
         )
@@ -397,7 +435,7 @@ class ConversationEngine:
             except Exception:
                 log.exception(
                     "conversation_sheets_write_failed",
-                    phone=session.phone,
+                    phone=mask_phone(session.phone),
                     lead_id=lead.lead_id,
                 )
 
@@ -410,6 +448,6 @@ class ConversationEngine:
             except Exception:
                 log.exception(
                     "conversation_telegram_notify_failed",
-                    phone=session.phone,
+                    phone=mask_phone(session.phone),
                     lead_id=lead.lead_id,
                 )

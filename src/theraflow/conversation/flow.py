@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from theraflow.config import settings
+
 # ---------------------------------------------------------------------------
 # Step enum
 # ---------------------------------------------------------------------------
@@ -384,7 +386,7 @@ STEP_CONFIGS: dict[Step, StepConfig] = {
             "Você concorda em continuar?"
         ),
         options=["Sim", LGPD_DECLINE_OPTION],
-        data_key=None,
+        data_key="consent",
     ),
     # ------------------------------------------------------------------
     # Step 14 — Closing (terminal; no user input expected)
@@ -394,7 +396,7 @@ STEP_CONFIGS: dict[Step, StepConfig] = {
             "Perfeito, já organizei suas informações.\n\n"
             "A Karoline costuma responder novos contatos ainda hoje.\n\n"
             "Se preferir, você também pode ver horários disponíveis:\n\n"
-            "[link de agendamento]"
+            f"{settings.scheduling_link}"
         ),
         data_key=None,
     ),

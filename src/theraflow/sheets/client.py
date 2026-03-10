@@ -32,6 +32,7 @@ from google.oauth2.service_account import Credentials as ServiceAccountCredentia
 from pydantic import BaseModel, Field
 
 from theraflow.logging import get_logger
+from theraflow.utils import mask_phone
 
 log = get_logger(__name__)
 
@@ -81,8 +82,8 @@ def calculate_score(data: dict[str, Any]) -> tuple[int, str]:
     Priority labels by total score:
 
     * **0-2** → ``"Low"``
-    * **3-5** → ``"Warm"``
-    * **6+**  → ``"Hot"``
+    * **3-4** → ``"Warm"``
+    * **5+**  → ``"Hot"``
 
     Args:
         data: Collected lead data keyed by conversation ``data_key`` values.
@@ -100,7 +101,7 @@ def calculate_score(data: dict[str, Any]) -> tuple[int, str]:
     if (data.get("note") or "").strip():
         score += 1
 
-    if score >= 6:
+    if score >= 5:
         priority = "Hot"
     elif score >= 3:
         priority = "Warm"
@@ -267,7 +268,7 @@ class SheetsClient:
         log.info(
             "sheets_lead_written",
             lead_id=lead.lead_id,
-            phone=lead.phone_number,
+            phone=mask_phone(lead.phone_number),
             score=lead.score,
             priority=lead.status,
         )
