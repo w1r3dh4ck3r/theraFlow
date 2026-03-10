@@ -19,7 +19,10 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse
 
 from theraflow.config import settings
+from theraflow.conversation import engine as conversation_engine
+from theraflow.conversation.engine import OutgoingMessage
 from theraflow.logging import get_logger
+from theraflow.whatsapp.sender import send_button_message, send_text_message
 
 log = get_logger(__name__)
 
@@ -143,6 +146,32 @@ def _extract_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return messages
 
 
+def _extract_contact_names(payload: dict[str, Any]) -> dict[str, str]:
+    """Return a mapping of WhatsApp ID → display name from a webhook payload.
+
+    Meta includes a ``contacts`` array alongside the ``messages`` array inside
+    each change value.  Each contact has a ``wa_id`` (the phone number) and a
+    ``profile.name`` field.
+
+    Args:
+        payload: The parsed JSON body from Meta's webhook POST.
+
+    Returns:
+        Dict mapping ``wa_id`` strings to display name strings.  Values may
+        be empty strings if the profile name was not provided.
+    """
+    names: dict[str, str] = {}
+    for entry in payload.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            for contact in value.get("contacts", []):
+                wa_id: str = contact.get("wa_id", "")
+                name: str = contact.get("profile", {}).get("name", "")
+                if wa_id:
+                    names[wa_id] = name
+    return names
+
+
 # ---------------------------------------------------------------------------
 # POST — inbound events
 # ---------------------------------------------------------------------------
@@ -187,9 +216,12 @@ async def receive_webhook(
         log.debug("webhook_no_messages", object_type=payload.get("object"))
         return {"status": "ok"}
 
+    contact_names = _extract_contact_names(payload)
+
     for message in messages:
         msg_type = message.get("type")
         sender: str | None = message.get("from")
+        name: str = contact_names.get(sender or "", "")
 
         if msg_type == "text":
             text: str = message.get("text", {}).get("body", "")
@@ -198,7 +230,7 @@ async def receive_webhook(
                 sender=sender,
                 length=len(text),
             )
-            await _dispatch(sender=sender, text=text, button_payload=None)
+            await _dispatch(sender=sender, name=name, text=text, button_payload=None)
 
         elif msg_type == "interactive":
             interactive = message.get("interactive", {})
@@ -209,7 +241,7 @@ async def receive_webhook(
                 button_id=button_reply.get("id"),
                 button_title=button_reply.get("title"),
             )
-            await _dispatch(sender=sender, text=None, button_payload=button_reply)
+            await _dispatch(sender=sender, name=name, text=None, button_payload=button_reply)
 
         else:
             log.debug("whatsapp_inbound_type_ignored", sender=sender, msg_type=msg_type)
@@ -225,28 +257,47 @@ async def receive_webhook(
 async def _dispatch(
     *,
     sender: str | None,
+    name: str,
     text: str | None,
     button_payload: dict[str, Any] | None,
 ) -> None:
     """Forward a parsed inbound message to the conversation engine.
 
-    This is intentionally a thin adapter.  When the conversation engine
-    module is implemented it will be wired in here, keeping the webhook
-    handler free of business logic.
+    This thin adapter keeps the webhook handler free of business logic.
+    It delegates to :func:`~theraflow.conversation.engine.ConversationEngine.handle_message`
+    and sends each returned :class:`~theraflow.conversation.engine.OutgoingMessage`
+    via the appropriate WhatsApp sender function.
 
     Args:
         sender: Sender's phone number (E.164, no ``+``).
+        name: WhatsApp display name for the contact (may be empty string).
         text: Message body for plain-text messages; ``None`` for button replies.
         button_payload: Parsed ``button_reply`` dict for interactive messages;
             ``None`` for plain-text messages.
     """
-    # TODO: replace with real conversation engine call, e.g.:
-    #   await conversation.handle_message(
-    #       sender=sender, text=text, button_payload=button_payload
-    #   )
+    if not sender:
+        log.warning("whatsapp_dispatch_no_sender")
+        return
+
     log.debug(
         "whatsapp_dispatch",
         sender=sender,
         text=text,
         button_payload=button_payload,
     )
+
+    outgoing: list[OutgoingMessage] = await conversation_engine.handle_message(
+        phone=sender,
+        name=name,
+        text=text,
+        button_payload=button_payload,
+    )
+
+    for msg in outgoing:
+        try:
+            if msg.is_interactive:
+                await send_button_message(sender, msg.text, msg.buttons)
+            else:
+                await send_text_message(sender, msg.text)
+        except Exception:
+            log.exception("whatsapp_send_failed", sender=sender)
