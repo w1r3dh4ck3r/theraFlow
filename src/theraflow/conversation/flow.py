@@ -386,7 +386,7 @@ STEP_CONFIGS: dict[Step, StepConfig] = {
             "Você concorda em continuar?"
         ),
         options=["Sim", LGPD_DECLINE_OPTION],
-        data_key=None,
+        data_key="consent",
     ),
     # ------------------------------------------------------------------
     # Step 14 — Closing (terminal; no user input expected)
