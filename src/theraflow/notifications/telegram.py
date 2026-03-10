@@ -18,29 +18,11 @@ import httpx
 
 from theraflow.config import settings
 from theraflow.logging import get_logger
-from theraflow.sheets.client import LeadData
+from theraflow.sheets.client import LeadData, calculate_score
 
 log = get_logger(__name__)
 
 _TELEGRAM_API_BASE = "https://api.telegram.org"
-
-
-def _priority_label(score: int) -> str:
-    """Return a priority label derived from a numeric lead score.
-
-    Mirrors the thresholds used by :func:`~theraflow.sheets.client.calculate_score`.
-
-    Args:
-        score: Integer lead score (0+).
-
-    Returns:
-        One of ``"Hot"``, ``"Warm"``, or ``"Low"``.
-    """
-    if score >= 6:
-        return "Hot"
-    if score >= 3:
-        return "Warm"
-    return "Low"
 
 
 class TelegramNotifier:
@@ -76,7 +58,7 @@ class TelegramNotifier:
             lead: A fully-populated :class:`~theraflow.sheets.client.LeadData`
                 instance representing the new lead.
         """
-        priority = _priority_label(lead.score)
+        _, priority = calculate_score(lead.model_dump())
         text = self._format_message(lead, priority)
 
         log.info(
