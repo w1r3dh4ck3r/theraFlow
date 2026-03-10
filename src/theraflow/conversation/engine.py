@@ -6,7 +6,10 @@ defined in :mod:`theraflow.conversation.flow`.
 
 Typical usage inside the webhook handler::
 
-    engine = ConversationEngine()
+    engine = ConversationEngine(
+        sheets_client=sheets_client,
+        telegram_notifier=telegram_notifier,
+    )
 
     messages = await engine.handle_message(
         phone="5511999999999",
@@ -25,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +45,11 @@ from theraflow.conversation.flow import (
     next_step,
 )
 from theraflow.logging import get_logger
+from theraflow.sheets.client import LeadData, calculate_score
+
+if TYPE_CHECKING:
+    from theraflow.notifications.telegram import TelegramNotifier
+    from theraflow.sheets.client import SheetsClient
 
 log = get_logger(__name__)
 
@@ -112,14 +120,26 @@ class ConversationEngine:
 
     All sessions are held in ``_sessions`` (a plain Python dict) for
     simplicity.  A single instance should be shared across the application
-    lifetime (see :mod:`theraflow.conversation.__init__`).
+    lifetime and is created during the FastAPI lifespan with injected
+    :class:`~theraflow.sheets.client.SheetsClient` and
+    :class:`~theraflow.notifications.telegram.TelegramNotifier` dependencies.
 
     Attributes:
         _sessions: Active sessions keyed by phone number (E.164, no ``+``).
+        _sheets_client: Client for persisting lead records to Google Sheets.
+            May be ``None`` if not configured (lead storage is skipped).
+        _telegram_notifier: Notifier for sending Telegram lead alerts.
+            May be ``None`` if not configured (notifications are skipped).
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        sheets_client: SheetsClient | None = None,
+        telegram_notifier: TelegramNotifier | None = None,
+    ) -> None:
         self._sessions: dict[str, UserSession] = {}
+        self._sheets_client = sheets_client
+        self._telegram_notifier = telegram_notifier
 
     # ------------------------------------------------------------------
     # Public API
@@ -323,22 +343,73 @@ class ConversationEngine:
     async def _on_conversation_complete(self, session: UserSession) -> None:
         """Hook called when a contact completes the flow and gives LGPD consent.
 
-        Assembles the full lead record, logs it, and delegates to the
-        Google Sheets and Telegram notification modules (currently stubbed).
+        Assembles the full :class:`~theraflow.sheets.client.LeadData` record,
+        logs it, persists it to Google Sheets, and sends a Telegram notification.
+
+        Error handling:
+
+        * If Sheets write fails — the exception is logged and suppressed so the
+          closing message is still delivered to the user.
+        * If Telegram notification fails — same: logged and suppressed.
 
         Args:
             session: The completed :class:`UserSession` with all collected data.
         """
-        lead_data: dict[str, Any] = {
-            "phone": session.phone,
-            "whatsapp_name": session.whatsapp_name,
-            "created_at": session.created_at.isoformat(),
-            **session.collected_data,
-        }
+        data = session.collected_data
+        score, _priority = calculate_score(data)
+
+        # Build the lead record; use empty-string defaults for any optional
+        # fields that might be absent (e.g. note on a skipped step).
+        _lead_fields: list[str] = [
+            "who_for",
+            "gender",
+            "age_group",
+            "city",
+            "format",
+            "first_therapy",
+            "topic",
+            "urgency",
+            "preferred_time",
+            "appointment_interest",
+            "note",
+            "consent",
+        ]
+        lead = LeadData(
+            whatsapp_name=session.whatsapp_name,
+            phone_number=session.phone,
+            score=score,
+            **{key: data.get(key, "") for key in _lead_fields},
+        )
+
         log.info(
             "conversation_complete",
             phone=session.phone,
-            lead=lead_data,
+            lead_id=lead.lead_id,
+            score=score,
         )
-        # TODO: await store_lead(lead_data)       — sheets module (Phase 1)
-        # TODO: await notify_assistant(lead_data) — notifications module (Phase 2)
+
+        # ----------------------------------------------------------------
+        # Persist lead to Google Sheets
+        # ----------------------------------------------------------------
+        if self._sheets_client is not None:
+            try:
+                await self._sheets_client.write_lead(lead)
+            except Exception:
+                log.exception(
+                    "conversation_sheets_write_failed",
+                    phone=session.phone,
+                    lead_id=lead.lead_id,
+                )
+
+        # ----------------------------------------------------------------
+        # Send Telegram notification
+        # ----------------------------------------------------------------
+        if self._telegram_notifier is not None:
+            try:
+                await self._telegram_notifier.send_lead_notification(lead)
+            except Exception:
+                log.exception(
+                    "conversation_telegram_notify_failed",
+                    phone=session.phone,
+                    lead_id=lead.lead_id,
+                )

@@ -19,8 +19,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse
 
 from theraflow.config import settings
-from theraflow.conversation import engine as conversation_engine
-from theraflow.conversation.engine import OutgoingMessage
+from theraflow.conversation.engine import ConversationEngine, OutgoingMessage
 from theraflow.logging import get_logger
 from theraflow.whatsapp.sender import send_button_message, send_text_message
 
@@ -217,6 +216,7 @@ async def receive_webhook(
         return {"status": "ok"}
 
     contact_names = _extract_contact_names(payload)
+    engine: ConversationEngine = request.app.state.engine
 
     for message in messages:
         msg_type = message.get("type")
@@ -230,7 +230,7 @@ async def receive_webhook(
                 sender=sender,
                 length=len(text),
             )
-            await _dispatch(sender=sender, name=name, text=text, button_payload=None)
+            await _dispatch(engine=engine, sender=sender, name=name, text=text, button_payload=None)
 
         elif msg_type == "interactive":
             interactive = message.get("interactive", {})
@@ -241,7 +241,7 @@ async def receive_webhook(
                 button_id=button_reply.get("id"),
                 button_title=button_reply.get("title"),
             )
-            await _dispatch(sender=sender, name=name, text=None, button_payload=button_reply)
+            await _dispatch(engine=engine, sender=sender, name=name, text=None, button_payload=button_reply)
 
         else:
             log.debug("whatsapp_inbound_type_ignored", sender=sender, msg_type=msg_type)
@@ -256,6 +256,7 @@ async def receive_webhook(
 
 async def _dispatch(
     *,
+    engine: ConversationEngine,
     sender: str | None,
     name: str,
     text: str | None,
@@ -269,6 +270,8 @@ async def _dispatch(
     via the appropriate WhatsApp sender function.
 
     Args:
+        engine: The application-wide :class:`~theraflow.conversation.engine.ConversationEngine`
+            instance retrieved from ``app.state``.
         sender: Sender's phone number (E.164, no ``+``).
         name: WhatsApp display name for the contact (may be empty string).
         text: Message body for plain-text messages; ``None`` for button replies.
@@ -286,7 +289,7 @@ async def _dispatch(
         button_payload=button_payload,
     )
 
-    outgoing: list[OutgoingMessage] = await conversation_engine.handle_message(
+    outgoing: list[OutgoingMessage] = await engine.handle_message(
         phone=sender,
         name=name,
         text=text,
