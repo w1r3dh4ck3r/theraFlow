@@ -14,8 +14,9 @@ os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "123456789")
 os.environ.setdefault("WHATSAPP_ACCESS_TOKEN", "test_access_token")
 os.environ.setdefault("WHATSAPP_VERIFY_TOKEN", "test_verify_token")
 os.environ.setdefault("WHATSAPP_APP_SECRET", "test_app_secret")
-os.environ.setdefault("GOOGLE_SHEETS_ID", "test_sheet_id")
-os.environ.setdefault("GOOGLE_SERVICE_ACCOUNT_JSON", "/tmp/fake_sa.json")
+os.environ.setdefault("GOOGLE_SHEETS_ID", "16anCOi-umO2N02fCdqqhMELqCeVpTGy6RnQ9fj8u1Ak")
+os.environ.setdefault("GOOGLE_SERVICE_ACCOUNT_JSON",
+                       os.path.join(os.path.dirname(__file__), "..", "secrets", "service-account.json"))
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123:test_token")
 os.environ.setdefault("TELEGRAM_CHAT_ID", "-1001234567890")
 
