@@ -50,18 +50,49 @@ COLUMNS: list[str] = [
     "phone_number",
     "who_for",
     "gender",
-    "age_group",
-    "city",
-    "format",
-    "first_therapy",
     "topic",
-    "urgency",
-    "preferred_time",
-    "appointment_interest",
-    "note",
-    "consent",
+    "terms_agreement",
+    "scheduling",
     "score",
     "status",
+]
+
+COLUMN_HEADERS: list[str] = [
+    "ID do Lead",
+    "Data/Hora",
+    "Nome WhatsApp",
+    "Telefone",
+    "Para quem",
+    "Gênero",
+    "Tema",
+    "Condições (R$60 + tarde)",
+    "Quando quer iniciar",
+    "Pontuação",
+    "Status",
+]
+
+FOLLOW_UP_COLUMNS: list[str] = [
+    "follow_up_id",
+    "timestamp",
+    "whatsapp_name",
+    "phone_number",
+    "who_for",
+    "gender",
+    "topic",
+    "urgency",
+    "status",
+]
+
+FOLLOW_UP_HEADERS: list[str] = [
+    "ID",
+    "Data/Hora",
+    "Nome WhatsApp",
+    "Telefone",
+    "Para quem",
+    "Gênero",
+    "Tema",
+    "Urgência",
+    "Status",
 ]
 
 
@@ -94,12 +125,11 @@ def calculate_score(data: dict[str, Any]) -> tuple[int, str]:
     """
     score = 0
 
-    if data.get("appointment_interest") == "Sim":
+    scheduling = data.get("scheduling", "")
+    if scheduling in ("O quanto antes", "Nesta semana"):
+        score += 5
+    elif scheduling == "Neste mês":
         score += 3
-    if data.get("urgency") == "O quanto antes":
-        score += 2
-    if (data.get("note") or "").strip():
-        score += 1
 
     if score >= 5:
         priority = "Hot"
@@ -148,16 +178,9 @@ class LeadData(BaseModel):
     phone_number: str
     who_for: str
     gender: str
-    age_group: str
-    city: str
-    format: str
-    first_therapy: str
     topic: str
-    urgency: str
-    preferred_time: str
-    appointment_interest: str
-    note: str
-    consent: str
+    terms_agreement: str
+    scheduling: str
     score: int
     status: str = "new"
 
@@ -169,6 +192,23 @@ class LeadData(BaseModel):
             directly to ``gspread``'s ``append_row()``.
         """
         return [getattr(self, col) for col in COLUMNS]
+
+
+class FollowUpData(BaseModel):
+    """Data for a follow-up contact (declined appointment)."""
+
+    follow_up_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    whatsapp_name: str
+    phone_number: str
+    who_for: str
+    gender: str
+    topic: str
+    urgency: str
+    status: str = "pendente"
+
+    def to_row(self) -> list[str]:
+        return [getattr(self, col) for col in FOLLOW_UP_COLUMNS]
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +247,11 @@ class SheetsClient:
             )
         )
         self._gc = gspread.authorize(self._credentials)
-        self._worksheet = self._gc.open_by_key(self._sheet_id).sheet1
+        self._spreadsheet = self._gc.open_by_key(self._sheet_id)
+        self._worksheet = self._spreadsheet.sheet1
+        self._follow_up_worksheet = self._get_or_create_follow_up_sheet()
+        self._ensure_headers()
+        self._ensure_follow_up_headers()
         log.info(
             "sheets_client_initialized",
             sheet_id=sheet_id,
@@ -218,14 +262,57 @@ class SheetsClient:
     # Private helpers (synchronous — run in executor)
     # ------------------------------------------------------------------
 
-    def _reauthorize(self) -> None:
-        """Re-authorize gspread and refresh the cached worksheet.
+    def _get_or_create_follow_up_sheet(self) -> gspread.Worksheet:
+        """Get or create the 'Follow Up' worksheet tab."""
+        try:
+            return self._spreadsheet.worksheet("Follow Up")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = self._spreadsheet.add_worksheet(title="Follow Up", rows=1000, cols=len(FOLLOW_UP_COLUMNS))
+            log.info("sheets_follow_up_tab_created")
+            return ws
 
-        Called automatically by :meth:`_append_row` when an
-        :class:`gspread.exceptions.APIError` suggests the token has expired.
-        """
+    def _ensure_follow_up_headers(self) -> None:
+        """Write column headers to row 1 of Follow Up sheet if empty."""
+        try:
+            first_row = self._follow_up_worksheet.row_values(1)
+            if not first_row:
+                self._follow_up_worksheet.append_row(FOLLOW_UP_HEADERS, value_input_option="USER_ENTERED")
+                self._follow_up_worksheet.format("1:1", {
+                    "textFormat": {"bold": True},
+                    "backgroundColor": {"red": 0.98, "green": 0.92, "blue": 0.9},
+                })
+                self._follow_up_worksheet.freeze(rows=1)
+                log.info("sheets_follow_up_headers_written")
+        except Exception:
+            log.warning("sheets_follow_up_headers_check_failed")
+
+    def _ensure_headers(self) -> None:
+        """Write column headers to row 1 and format the main sheet."""
+        try:
+            # Rename tab if still default
+            if self._worksheet.title == "Sheet1":
+                self._worksheet.update_title("Leads")
+                log.info("sheets_tab_renamed", title="Leads")
+
+            first_row = self._worksheet.row_values(1)
+            if not first_row:
+                self._worksheet.append_row(COLUMN_HEADERS, value_input_option="USER_ENTERED")
+                # Bold + freeze header row
+                self._worksheet.format("1:1", {
+                    "textFormat": {"bold": True},
+                    "backgroundColor": {"red": 0.9, "green": 0.93, "blue": 0.98},
+                })
+                self._worksheet.freeze(rows=1)
+                log.info("sheets_headers_written")
+        except Exception:
+            log.warning("sheets_headers_check_failed")
+
+    def _reauthorize(self) -> None:
+        """Re-authorize gspread and refresh the cached worksheets."""
         self._gc = gspread.authorize(self._credentials)
-        self._worksheet = self._gc.open_by_key(self._sheet_id).sheet1
+        self._spreadsheet = self._gc.open_by_key(self._sheet_id)
+        self._worksheet = self._spreadsheet.sheet1
+        self._follow_up_worksheet = self._get_or_create_follow_up_sheet()
 
     def _append_row(self, row: list[str | int]) -> None:
         """Synchronously append *row* to the first worksheet.
@@ -246,6 +333,15 @@ class SheetsClient:
             log.warning("sheets_reauthorizing", reason="APIError on append_row")
             self._reauthorize()
             self._worksheet.append_row(row, value_input_option="USER_ENTERED")
+
+    def _append_follow_up_row(self, row: list[str]) -> None:
+        """Synchronously append *row* to the Follow Up worksheet."""
+        try:
+            self._follow_up_worksheet.append_row(row, value_input_option="USER_ENTERED")
+        except gspread.exceptions.APIError:
+            log.warning("sheets_reauthorizing", reason="APIError on follow_up append_row")
+            self._reauthorize()
+            self._follow_up_worksheet.append_row(row, value_input_option="USER_ENTERED")
 
     # ------------------------------------------------------------------
     # Public async API
@@ -271,4 +367,15 @@ class SheetsClient:
             phone=mask_phone(lead.phone_number),
             score=lead.score,
             priority=lead.status,
+        )
+
+    async def write_follow_up(self, follow_up: FollowUpData) -> None:
+        """Append a follow-up record to the Follow Up tab."""
+        row = follow_up.to_row()
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._append_follow_up_row, row)
+        log.info(
+            "sheets_follow_up_written",
+            follow_up_id=follow_up.follow_up_id,
+            phone=mask_phone(follow_up.phone_number),
         )

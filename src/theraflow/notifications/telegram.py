@@ -110,23 +110,33 @@ class TelegramNotifier:
 
     @staticmethod
     def _format_message(lead: LeadData, priority: str) -> str:
-        """Build the HTML-formatted notification message in Portuguese.
+        """Build the HTML-formatted notification message in Portuguese."""
+        urgency_map = {
+            "Hot": "URGENTE",
+            "Warm": "Moderada",
+            "Low": "Baixa",
+        }
+        urgency_label = urgency_map.get(priority, priority)
 
-        Args:
-            lead: Lead data to include in the message.
-            priority: Human-readable priority label (``"Hot"``, ``"Warm"``,
-                or ``"Low"``).
+        header = "🔴 <b>LEAD URGENTE — QUER AGENDAR!</b>" if priority == "Hot" else "🟢 <b>Novo lead theraFlow</b>"
+        from urllib.parse import quote
+        greeting = quote(
+            f"Olá {lead.whatsapp_name}, aqui é a Karoline Jangola. "
+            f"Recebi seu contato e gostaria de agendar sua primeira sessão. "
+            f"Qual horário seria melhor para você?"
+        )
+        wa_link = f"https://wa.me/{lead.phone_number}?text={greeting}"
 
-        Returns:
-            A multi-line HTML string suitable for Telegram's ``parse_mode=HTML``.
-        """
         return (
-            "🟢 <b>Novo lead theraFlow!</b>\n"
-            f"Nome: {lead.whatsapp_name}\n"
-            f"Telefone: {lead.phone_number}\n"
-            f"Tema: {lead.topic}\n"
-            f"Urgência: {lead.urgency}\n"
-            f"Score: {lead.score} ({priority})"
+            f"{header}\n\n"
+            f"<b>Nome:</b> {lead.whatsapp_name}\n"
+            f"<b>Telefone:</b> <a href=\"{wa_link}\">{lead.phone_number}</a>\n"
+            f"<b>Para quem:</b> {lead.who_for}\n"
+            f"<b>Gênero:</b> {lead.gender}\n"
+            f"<b>Tema:</b> {lead.topic}\n"
+            f"<b>Condições (R$60 + tarde):</b> {lead.terms_agreement}\n"
+            f"<b>Quando quer iniciar:</b> {lead.scheduling}\n\n"
+            f"<b>Prioridade:</b> {urgency_label} ({lead.score} pts)"
         )
 
     async def _post_message(self, text: str) -> None:

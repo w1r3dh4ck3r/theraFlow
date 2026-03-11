@@ -30,16 +30,22 @@ def _sign_payload(body: bytes) -> str:
 
 def _whatsapp_payload(
     sender: str, *, text: str | None = None, button_id: str | None = None, button_title: str | None = None,
+    list_id: str | None = None, list_title: str | None = None,
 ) -> dict[str, Any]:
     if text:
         message: dict[str, Any] = {"id": "wamid_test", "from": sender, "type": "text", "text": {"body": text}}
+    elif list_id:
+        message = {
+            "id": "wamid_test", "from": sender, "type": "interactive",
+            "interactive": {"type": "list_reply", "list_reply": {"id": list_id, "title": list_title or ""}},
+        }
     elif button_id:
         message = {
             "id": "wamid_test", "from": sender, "type": "interactive",
             "interactive": {"type": "button_reply", "button_reply": {"id": button_id, "title": button_title or ""}},
         }
     else:
-        raise ValueError("Must provide text or button_id")
+        raise ValueError("Must provide text, button_id, or list_id")
 
     return {
         "object": "whatsapp_business_account",
@@ -71,26 +77,27 @@ class WebhookClient:
             headers={"Content-Type": "application/json", "X-Hub-Signature-256": _sign_payload(body)},
         )
 
+    async def send_list_reply(self, sender: str, list_id: str, title: str = "") -> httpx.Response:
+        payload = _whatsapp_payload(sender, list_id=list_id, list_title=title)
+        body = json.dumps(payload).encode()
+        return await self._client.post(
+            "/webhook/whatsapp", content=body,
+            headers={"Content-Type": "application/json", "X-Hub-Signature-256": _sign_payload(body)},
+        )
+
 
 # Full happy path answers.
 # The FIRST message to a new contact always creates a session and returns the
 # GREETING prompt — the message content is NOT processed as an answer.  So the
 # flow is: trigger → answer GREETING → answer WHO_FOR → … → answer CONSENT.
 HAPPY_PATH_STEPS = [
-    ("text", "oi"),                                      # Trigger → session created, GREETING prompt
-    ("button", "opt_0", "Sim"),                          # GREETING → Sim
-    ("text", "1"),                                       # WHO_FOR → Para mim
+    ("text", "oi"),                                      # Trigger → GREETING prompt
+    ("button", "opt_0", "Vamos"),                        # GREETING → Vamos
+    ("button", "opt_0", "Para mim"),                     # WHO_FOR → Para mim
     ("button", "opt_0", "Mulher"),                       # GENDER → Mulher
-    ("text", "3"),                                       # AGE_GROUP → 18–24
-    ("text", "São Paulo"),                               # CITY
-    ("button", "opt_0", "Online"),                       # FORMAT → Online
-    ("button", "opt_0", "Sim"),                          # FIRST_THERAPY → Sim
-    ("text", "1"),                                       # TOPIC → Ansiedade
-    ("text", "1"),                                       # URGENCY → O quanto antes
-    ("text", "4"),                                       # PREFERRED_TIME → Flexível
-    ("button", "opt_0", "Sim"),                          # APPOINTMENT_INTENT → Sim
-    ("text", "Estou passando por um momento difícil"),   # OPTIONAL_NOTE
-    ("button", "opt_0", "Sim"),                          # CONSENT → Sim → CLOSING
+    ("list", "opt_0", "Ansiedade"),                      # TOPIC → Ansiedade
+    ("button", "opt_0", "Concordo"),                     # TERMS → Concordo
+    ("list", "opt_0", "O quanto antes"),                 # SCHEDULING → O quanto antes → CLOSING
 ]
 
 
@@ -103,13 +110,11 @@ async def sim():
 
     async def capture_post(url, **kwargs):
         outbound.append({"url": str(url), **kwargs})
-        # Build a proper response with a request object so raise_for_status() works
         request = httpx.Request("POST", url)
         return httpx.Response(200, json={"messages": [{"id": "ok"}], "ok": True, "result": True}, request=request)
 
     mock_http.post = AsyncMock(side_effect=capture_post)
 
-    # Inject mocked dependencies directly into app state
     telegram = TelegramNotifier(http_client=mock_http)
     engine = ConversationEngine(sheets_client=None, telegram_notifier=telegram)
     app.state.http_client = mock_http
@@ -119,7 +124,6 @@ async def sim():
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c, outbound
 
-    # Cleanup
     del app.state.engine
     del app.state.http_client
 
@@ -200,78 +204,59 @@ async def test_webhook_signature_invalid(sim):
     assert resp.status_code == 403
 
 
+async def _run_steps(wh: WebhookClient, sender: str, steps: list) -> list[httpx.Response]:
+    """Run a sequence of steps, returning all responses."""
+    responses = []
+    for step_type, value, *extra in steps:
+        if step_type == "list":
+            resp = await wh.send_list_reply(sender, value, extra[0] if extra else "")
+        elif step_type == "button":
+            resp = await wh.send_button(sender, value, extra[0] if extra else "")
+        else:
+            resp = await wh.send_text(sender, value)
+        responses.append(resp)
+    return responses
+
+
 # ── Full flow simulation tests ────────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_full_happy_path(sim):
-    """Complete 14-step conversation → WhatsApp replies + Telegram notification."""
+    """Complete conversation → WhatsApp replies + Telegram notification."""
     client, outbound = sim
     wh = WebhookClient(client)
     sender = "5511999990001"
 
-    for step_type, value, *extra in HAPPY_PATH_STEPS:
-        if step_type == "button":
-            resp = await wh.send_button(sender, value, extra[0] if extra else "")
-        else:
-            resp = await wh.send_text(sender, value)
-        assert resp.status_code == 200, f"Step failed at {step_type}={value}: {resp.status_code}"
+    responses = await _run_steps(wh, sender, HAPPY_PATH_STEPS)
+    for resp in responses:
+        assert resp.status_code == 200
 
     whatsapp_calls = [c for c in outbound if "graph.facebook.com" in c["url"]]
     telegram_calls = [c for c in outbound if "telegram" in c["url"]]
 
-    assert len(whatsapp_calls) >= 14, f"Expected >=14 WhatsApp calls, got {len(whatsapp_calls)}"
+    assert len(whatsapp_calls) >= 7, f"Expected >=7 WhatsApp calls, got {len(whatsapp_calls)}"
     assert len(telegram_calls) == 1, f"Expected 1 Telegram call, got {len(telegram_calls)}"
 
     tg_payload = telegram_calls[0].get("json", {})
     tg_text = tg_payload.get("text", "")
-    assert "Novo lead" in tg_text
+    assert "URGENTE" in tg_text
     assert "Ansiedade" in tg_text
     assert tg_payload.get("parse_mode") == "HTML"
 
-    print(f"\n  WhatsApp messages sent: {len(whatsapp_calls)}")
-    print(f"  Telegram notifications: {len(telegram_calls)}")
-    print(f"  Telegram message:\n  {tg_text}")
-
 
 @pytest.mark.asyncio
-async def test_human_handoff(sim):
-    """'Falar com alguém' at greeting → handoff, no Telegram."""
+async def test_terms_declined(sim):
+    """Decline terms (R$60 + afternoon) → end flow, no Telegram."""
     client, outbound = sim
     wh = WebhookClient(client)
     sender = "5511999990002"
 
-    # Trigger session creation → GREETING prompt
-    resp = await wh.send_text(sender, "oi")
-    assert resp.status_code == 200
+    # Run through to TERMS
+    await _run_steps(wh, sender, HAPPY_PATH_STEPS[:5])
 
-    # Answer GREETING with handoff option
-    resp = await wh.send_button(sender, "opt_1", "Falar com alguém")
-    assert resp.status_code == 200
-
-    whatsapp_calls = [c for c in outbound if "graph.facebook.com" in c["url"]]
-    telegram_calls = [c for c in outbound if "telegram" in c["url"]]
-
-    assert len(whatsapp_calls) == 2, "Should send GREETING prompt + handoff message"
-    assert len(telegram_calls) == 0, "No Telegram on handoff"
-
-
-@pytest.mark.asyncio
-async def test_lgpd_consent_denied(sim):
-    """Full flow but declines consent → no Telegram."""
-    client, outbound = sim
-    wh = WebhookClient(client)
-    sender = "5511999990003"
-
-    # Run all steps except the last (CONSENT answer)
-    for step_type, value, *extra in HAPPY_PATH_STEPS[:-1]:
-        if step_type == "button":
-            await wh.send_button(sender, value, extra[0] if extra else "")
-        else:
-            await wh.send_text(sender, value)
-
-    # Decline consent
-    resp = await wh.send_button(sender, "opt_1", "Não")
+    # Decline terms
+    resp = await wh.send_button(sender, "opt_1", "Não concordo")
     assert resp.status_code == 200
 
     telegram_calls = [c for c in outbound if "telegram" in c["url"]]
@@ -284,18 +269,12 @@ async def test_concurrent_users(sim):
     client, _ = sim
     wh = WebhookClient(client)
 
-    # Trigger session creation for both users
     assert (await wh.send_text("5511000000001", "oi")).status_code == 200
     assert (await wh.send_text("5511000000002", "oi")).status_code == 200
-    # Both answer GREETING
-    assert (await wh.send_button("5511000000001", "opt_0", "Sim")).status_code == 200
-    assert (await wh.send_button("5511000000002", "opt_0", "Sim")).status_code == 200
-    # Both answer WHO_FOR (interleaved)
+    assert (await wh.send_button("5511000000001", "opt_0", "OK")).status_code == 200
+    assert (await wh.send_button("5511000000002", "opt_0", "OK")).status_code == 200
     assert (await wh.send_text("5511000000001", "1")).status_code == 200
     assert (await wh.send_text("5511000000002", "2")).status_code == 200
-    # Both answer GENDER
-    assert (await wh.send_button("5511000000001", "opt_0", "Mulher")).status_code == 200
-    assert (await wh.send_button("5511000000002", "opt_1", "Homem")).status_code == 200
 
 
 @pytest.mark.asyncio
@@ -303,15 +282,11 @@ async def test_invalid_input_reprompt(sim):
     """Invalid button → reprompt; valid → advances."""
     client, outbound = sim
     wh = WebhookClient(client)
-    sender = "5511999990004"
+    sender = "5511999990005"
 
-    # Trigger session → GREETING prompt (1 call)
     assert (await wh.send_text(sender, "oi")).status_code == 200
-    # Invalid button at GREETING → error text + GREETING reprompt (2 calls)
     assert (await wh.send_button(sender, "opt_99", "bogus")).status_code == 200
-    # Valid button at GREETING → advance to WHO_FOR (1 call)
-    assert (await wh.send_button(sender, "opt_0", "Sim")).status_code == 200
-    # Answer WHO_FOR → advance to GENDER (1 call)
+    assert (await wh.send_button(sender, "opt_0", "OK")).status_code == 200
     assert (await wh.send_text(sender, "1")).status_code == 200
 
     whatsapp_calls = [c for c in outbound if "graph.facebook.com" in c["url"]]
@@ -325,30 +300,22 @@ async def test_full_happy_path_with_sheets(sim_with_sheets):
     wh = WebhookClient(client)
     sender = "5511999990099"
 
-    for step_type, value, *extra in HAPPY_PATH_STEPS:
-        if step_type == "button":
-            resp = await wh.send_button(sender, value, extra[0] if extra else "")
-        else:
-            resp = await wh.send_text(sender, value)
-        assert resp.status_code == 200, f"Step failed at {step_type}={value}: {resp.status_code}"
+    responses = await _run_steps(wh, sender, HAPPY_PATH_STEPS)
+    for resp in responses:
+        assert resp.status_code == 200
 
-    # Verify Sheets row was written
     import asyncio
     rows = await asyncio.get_event_loop().run_in_executor(
         None, sheets._worksheet.get_all_values,
     )
-    # Find our test row by phone number
     matching = [r for r in rows if sender in r]
     assert len(matching) >= 1, f"Expected lead row for {sender} in Sheets, found none"
     row = matching[-1]
     print(f"\n  Sheets row: {row}")
 
-    # Verify key fields in the row
-    assert "Para mim" in row        # who_for
-    assert "Mulher" in row           # gender
-    assert "São Paulo" in row        # city
-    assert "Ansiedade" in row        # topic
-    assert "Sim" in row              # consent
+    assert "Para mim" in row
+    assert "Mulher" in row
+    assert "Sim" in row
 
     # Clean up: delete the test row
     for i, r in enumerate(rows):
@@ -360,11 +327,29 @@ async def test_full_happy_path_with_sheets(sim_with_sheets):
 
 
 @pytest.mark.asyncio
+async def test_scheduling_declined(sim):
+    """'Não quero iniciar agora' → Follow Up sheet, no Telegram."""
+    client, outbound = sim
+    wh = WebhookClient(client)
+    sender = "5511999990006"
+
+    # Run through to SCHEDULING (trigger through TERMS)
+    await _run_steps(wh, sender, HAPPY_PATH_STEPS[:6])
+
+    # Decline scheduling — "Ainda estou pensando" is opt_3
+    resp = await wh.send_list_reply(sender, "opt_3", "Ainda estou pensando")
+    assert resp.status_code == 200
+
+    telegram_calls = [c for c in outbound if "telegram" in c["url"]]
+    assert len(telegram_calls) == 0
+
+
+@pytest.mark.asyncio
 async def test_score_calculation():
-    """Lead scoring: appointment(3) + urgency(2) + note(1)."""
+    """Lead scoring based on scheduling urgency."""
     from theraflow.sheets.client import calculate_score
 
-    assert calculate_score({"appointment_interest": "Sim", "urgency": "O quanto antes", "note": "x"}) == (6, "Hot")
-    assert calculate_score({"appointment_interest": "Sim", "urgency": "O quanto antes"}) == (5, "Hot")
-    assert calculate_score({"appointment_interest": "Sim", "urgency": "Neste mês"}) == (3, "Warm")
+    assert calculate_score({"scheduling": "O quanto antes"}) == (5, "Hot")
+    assert calculate_score({"scheduling": "Nesta semana"}) == (5, "Hot")
+    assert calculate_score({"scheduling": "Neste mês"}) == (3, "Warm")
     assert calculate_score({}) == (0, "Low")

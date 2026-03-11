@@ -1,0 +1,7 @@
+tunnel: 99ef3355-f097-4a41-a7e2-a1099aa591d1
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: theraflow.w1r3d.dev
+    service: http://bot:8000
+  - service: http_status:404

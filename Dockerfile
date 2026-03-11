@@ -1,6 +1,6 @@
 # =============================================================
 # Multi-stage Dockerfile for TheraFlow
-# Stage 1 – builder: install dependencies with uv
+# Stage 1 – builder: install dependencies + package with uv
 # Stage 2 – runtime: lean image with only what's needed
 # =============================================================
 
@@ -14,19 +14,13 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
-# Copy dependency manifests first for layer caching
-COPY pyproject.toml ./
+# Copy everything needed for install
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
 
-# Create a virtual environment and install runtime dependencies only
+# Create venv, install deps + package in one step
 RUN uv venv /app/.venv && \
-    uv pip install --python /app/.venv/bin/python \
-        fastapi \
-        "uvicorn[standard]" \
-        httpx \
-        gspread \
-        pydantic-settings \
-        structlog \
-        python-dotenv
+    uv pip install --python /app/.venv/bin/python .
 
 # ---------------------------------------------------------------
 # Stage 2: runtime
@@ -40,9 +34,6 @@ WORKDIR /app
 
 # Copy the pre-built virtual environment from builder
 COPY --from=builder /app/.venv /app/.venv
-
-# Copy application source
-COPY src/ ./src/
 
 # Make venv binaries take priority on PATH
 ENV PATH="/app/.venv/bin:$PATH" \

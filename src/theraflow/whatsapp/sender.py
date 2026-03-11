@@ -182,3 +182,60 @@ async def send_button_message(
         phone=mask_phone(phone),
         status_code=response.status_code,
     )
+
+
+async def send_list_message(
+    phone: str,
+    body_text: str,
+    button_text: str,
+    rows: list[dict],
+    *,
+    http_client: httpx.AsyncClient,
+) -> None:
+    """Send an interactive list message (up to 10 selectable rows).
+
+    Args:
+        phone: Recipient phone number (E.164, no ``+``).
+        body_text: Message body displayed above the list button.
+        button_text: Label on the button that opens the list (max 20 chars).
+        rows: List of row dicts, each with ``"id"`` and ``"title"`` keys.
+        http_client: Shared httpx client.
+    """
+    to = _normalize_br_phone(phone)
+    payload: dict = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": body_text},
+            "action": {
+                "button": button_text[:20],
+                "sections": [
+                    {
+                        "title": "Opções",
+                        "rows": [
+                            {"id": row["id"], "title": row["title"][:24]}
+                            for row in rows
+                        ],
+                    }
+                ],
+            },
+        },
+    }
+
+    log.info("whatsapp_send_list", phone=mask_phone(phone), row_count=len(rows))
+
+    response = await http_client.post(
+        _messages_url(),
+        json=payload,
+        headers=_auth_headers(),
+    )
+    response.raise_for_status()
+
+    log.debug(
+        "whatsapp_send_list_ok",
+        phone=mask_phone(phone),
+        status_code=response.status_code,
+    )

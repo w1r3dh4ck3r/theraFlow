@@ -33,12 +33,11 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from theraflow.conversation.flow import (
-    HUMAN_HANDOFF_MESSAGE,
-    HUMAN_HANDOFF_OPTION,
+    DECLINE_OPTION,
     INVALID_INPUT_MESSAGE,
-    LGPD_DECLINE_OPTION,
-    LGPD_DECLINED_MESSAGE,
-    SKIP_KEYWORDS,
+    SCHEDULING_DECLINE_OPTION,
+    SCHEDULING_DECLINED_MESSAGE,
+    TERMS_DECLINED_MESSAGE,
     STEP_CONFIGS,
     Step,
     StepConfig,
@@ -69,25 +68,19 @@ log = get_logger(__name__)
 
 @dataclass
 class OutgoingMessage:
-    """A single message to be sent back to the user.
-
-    Attributes:
-        text: Message body text.  Used as the body for both plain-text and
-            interactive button messages.
-        buttons: Button descriptors for interactive messages.  Each dict
-            must contain ``"id"`` (≤256 chars) and ``"title"`` (≤20 chars)
-            keys as expected by
-            :func:`~theraflow.whatsapp.sender.send_button_message`.
-            Empty list means a plain-text message.
-    """
+    """A single message to be sent back to the user."""
 
     text: str
     buttons: list[dict[str, str]] = field(default_factory=list)
+    list_rows: list[dict[str, str]] = field(default_factory=list)
 
     @property
-    def is_interactive(self) -> bool:
-        """True when this message should be sent as an interactive button message."""
+    def is_button(self) -> bool:
         return bool(self.buttons)
+
+    @property
+    def is_list(self) -> bool:
+        return bool(self.list_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -236,17 +229,6 @@ class ConversationEngine:
         answer: str | None = config.resolve_answer(text, button_id, button_title)
 
         # ----------------------------------------------------------------
-        # Step-specific answer normalisation
-        # ----------------------------------------------------------------
-
-        # Step 12 — OPTIONAL_NOTE: treat None, empty input, or skip keywords
-        # as an intentional skip (store empty string rather than nothing).
-        if current == Step.OPTIONAL_NOTE:
-            raw = (text or "").strip()
-            if answer is None or raw.lower() in SKIP_KEYWORDS:
-                answer = ""
-
-        # ----------------------------------------------------------------
         # Invalid input — reprompt without advancing the step
         # ----------------------------------------------------------------
         if answer is None and not config.accepts_free_text:
@@ -260,20 +242,22 @@ class ConversationEngine:
             return [OutgoingMessage(text=INVALID_INPUT_MESSAGE), *self._build_prompt(current)]
 
         # ----------------------------------------------------------------
-        # Special branch: human handoff (GREETING → "Prefiro falar com uma pessoa")
+        # Special branch: decline terms (price + afternoon) → end flow
         # ----------------------------------------------------------------
-        if current == Step.GREETING and answer == HUMAN_HANDOFF_OPTION:
-            log.info("conversation_human_handoff", phone=mask_phone(phone))
+        if current == Step.TERMS and answer == DECLINE_OPTION:
+            log.info("conversation_terms_declined", phone=mask_phone(phone))
             self._cleanup_session(phone)
-            return [OutgoingMessage(text=HUMAN_HANDOFF_MESSAGE)]
+            return [OutgoingMessage(text=TERMS_DECLINED_MESSAGE)]
 
         # ----------------------------------------------------------------
-        # Special branch: LGPD consent declined (CONSENT → "Não")
+        # Special branch: decline scheduling → Follow Up sheet, end flow
         # ----------------------------------------------------------------
-        if current == Step.CONSENT and answer == LGPD_DECLINE_OPTION:
-            log.info("conversation_lgpd_declined", phone=mask_phone(phone))
+        if current == Step.SCHEDULING and answer == SCHEDULING_DECLINE_OPTION:
+            log.info("conversation_scheduling_declined", phone=mask_phone(phone))
+            session.collected_data["scheduling"] = SCHEDULING_DECLINE_OPTION
+            await self._on_follow_up(session)
             self._cleanup_session(phone)
-            return [OutgoingMessage(text=LGPD_DECLINED_MESSAGE)]
+            return [OutgoingMessage(text=SCHEDULING_DECLINED_MESSAGE)]
 
         # ----------------------------------------------------------------
         # Store the answer in collected_data
@@ -370,13 +354,40 @@ class ConversationEngine:
         if config.use_buttons:
             return [OutgoingMessage(text=config.prompt, buttons=config.to_buttons())]
 
-        # Numbered-list or free-text steps — send as plain text.
+        if config.use_list:
+            return [OutgoingMessage(text=config.prompt, list_rows=config.to_list_rows())]
+
         return [OutgoingMessage(text=config.full_prompt())]
 
     def _cleanup_session(self, phone: str) -> None:
         """Remove the active session for *phone*, if any."""
         self._sessions.pop(phone, None)
         log.info("conversation_session_cleaned", phone=mask_phone(phone))
+
+    async def _on_follow_up(self, session: UserSession) -> None:
+        """Write a follow-up record when a contact declines appointment scheduling.
+
+        The lead is written to a separate "Follow Up" tab in Google Sheets
+        so the team can re-contact them later.
+        """
+        if self._sheets_client is not None:
+            try:
+                data = session.collected_data
+                from theraflow.sheets.client import FollowUpData
+                follow_up = FollowUpData(
+                    whatsapp_name=session.whatsapp_name,
+                    phone_number=session.phone,
+                    who_for=data.get("who_for", ""),
+                    gender=data.get("gender", ""),
+                    topic=data.get("topic", ""),
+                    urgency=data.get("urgency", ""),
+                )
+                await self._sheets_client.write_follow_up(follow_up)
+            except Exception:
+                log.exception(
+                    "conversation_follow_up_write_failed",
+                    phone=mask_phone(session.phone),
+                )
 
     async def _on_conversation_complete(self, session: UserSession) -> None:
         """Hook called when a contact completes the flow and gives LGPD consent.
@@ -401,16 +412,9 @@ class ConversationEngine:
         _lead_fields: list[str] = [
             "who_for",
             "gender",
-            "age_group",
-            "city",
-            "format",
-            "first_therapy",
             "topic",
-            "urgency",
-            "preferred_time",
-            "appointment_interest",
-            "note",
-            "consent",
+            "terms_agreement",
+            "scheduling",
         ]
         lead = LeadData(
             whatsapp_name=session.whatsapp_name,

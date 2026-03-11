@@ -23,7 +23,7 @@ from theraflow.config import settings
 from theraflow.conversation.engine import ConversationEngine, OutgoingMessage
 from theraflow.logging import get_logger
 from theraflow.utils import mask_phone
-from theraflow.whatsapp.sender import send_button_message, send_text_message
+from theraflow.whatsapp.sender import send_button_message, send_list_message, send_text_message
 
 log = get_logger(__name__)
 
@@ -245,19 +245,20 @@ async def receive_webhook(
 
             elif msg_type == "interactive":
                 interactive = message.get("interactive", {})
-                button_reply: dict[str, Any] = interactive.get("button_reply", {})
+                reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
                 log.info(
-                    "whatsapp_inbound_button_reply",
+                    "whatsapp_inbound_interactive_reply",
                     sender=mask_phone(sender),
-                    button_id=button_reply.get("id"),
-                    button_title=button_reply.get("title"),
+                    reply_type=interactive.get("type"),
+                    reply_id=reply.get("id"),
+                    reply_title=reply.get("title"),
                 )
                 await _dispatch(
                     engine=engine,
                     sender=sender,
                     name=name,
                     text=None,
-                    button_payload=button_reply,
+                    button_payload=reply,
                     http_client=http_client,
                 )
 
@@ -327,8 +328,10 @@ async def _dispatch(
 
     for msg in outgoing:
         try:
-            if msg.is_interactive:
+            if msg.is_button:
                 await send_button_message(sender, msg.text, msg.buttons, http_client=http_client)
+            elif msg.is_list:
+                await send_list_message(sender, msg.text, "Selecionar", msg.list_rows, http_client=http_client)
             else:
                 await send_text_message(sender, msg.text, http_client=http_client)
         except Exception:
