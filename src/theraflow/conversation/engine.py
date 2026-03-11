@@ -188,6 +188,9 @@ class ConversationEngine:
         button_id: str | None = (button_payload or {}).get("id")
         button_title: str | None = (button_payload or {}).get("title")
 
+        # Determine inbound content for logging
+        inbound_text = button_title or text or ""
+
         session = self._sessions.get(phone)
 
         # ----------------------------------------------------------------
@@ -207,7 +210,10 @@ class ConversationEngine:
                 phone=mask_phone(phone),
                 name=name,
             )
-            return self._build_prompt(Step.GREETING)
+            await self._log_conversation(phone, name, "GREETING", "in", inbound_text)
+            replies = self._build_prompt(Step.GREETING)
+            await self._log_conversation(phone, name, "GREETING", "out", replies[0].text if replies else "")
+            return replies
 
         # ----------------------------------------------------------------
         # Guard: ignore messages after the session has reached a terminal step
@@ -222,6 +228,9 @@ class ConversationEngine:
             return []
 
         config: StepConfig = STEP_CONFIGS[current]
+
+        # Log inbound message
+        await self._log_conversation(phone, session.whatsapp_name, current.value, "in", inbound_text)
 
         # ----------------------------------------------------------------
         # Resolve the user's answer
@@ -239,13 +248,16 @@ class ConversationEngine:
                 text=text,
                 button_id=button_id,
             )
-            return [OutgoingMessage(text=INVALID_INPUT_MESSAGE), *self._build_prompt(current)]
+            replies = [OutgoingMessage(text=INVALID_INPUT_MESSAGE), *self._build_prompt(current)]
+            await self._log_conversation(phone, session.whatsapp_name, current.value, "out", INVALID_INPUT_MESSAGE)
+            return replies
 
         # ----------------------------------------------------------------
         # Special branch: decline terms (price + afternoon) → end flow
         # ----------------------------------------------------------------
         if current == Step.TERMS and answer == DECLINE_OPTION:
             log.info("conversation_terms_declined", phone=mask_phone(phone))
+            await self._log_conversation(phone, session.whatsapp_name, "TERMS", "out", TERMS_DECLINED_MESSAGE)
             self._cleanup_session(phone)
             return [OutgoingMessage(text=TERMS_DECLINED_MESSAGE)]
 
@@ -256,6 +268,7 @@ class ConversationEngine:
             log.info("conversation_scheduling_declined", phone=mask_phone(phone))
             session.collected_data["scheduling"] = SCHEDULING_DECLINE_OPTION
             await self._on_follow_up(session)
+            await self._log_conversation(phone, session.whatsapp_name, "SCHEDULING", "out", SCHEDULING_DECLINED_MESSAGE)
             self._cleanup_session(phone)
             return [OutgoingMessage(text=SCHEDULING_DECLINED_MESSAGE)]
 
@@ -296,10 +309,13 @@ class ConversationEngine:
         if advance_to == Step.CLOSING:
             await self._on_conversation_complete(session)
             messages = self._build_prompt(Step.CLOSING)
+            await self._log_conversation(phone, session.whatsapp_name, "CLOSING", "out", messages[0].text if messages else "")
             self._cleanup_session(phone)
             return messages
 
-        return self._build_prompt(advance_to)
+        replies = self._build_prompt(advance_to)
+        await self._log_conversation(phone, session.whatsapp_name, advance_to.value, "out", replies[0].text if replies else "")
+        return replies
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -363,6 +379,17 @@ class ConversationEngine:
         """Remove the active session for *phone*, if any."""
         self._sessions.pop(phone, None)
         log.info("conversation_session_cleaned", phone=mask_phone(phone))
+
+    async def _log_conversation(
+        self, phone: str, name: str, step: str, direction: str, content: str,
+    ) -> None:
+        """Log a conversation message to Google Sheets (fire-and-forget)."""
+        if self._sheets_client is None:
+            return
+        try:
+            await self._sheets_client.log_conversation(phone, name, step, direction, content)
+        except Exception:
+            log.debug("conversation_log_write_failed", phone=mask_phone(phone), step=step)
 
     async def _on_follow_up(self, session: UserSession) -> None:
         """Write a follow-up record when a contact declines appointment scheduling.

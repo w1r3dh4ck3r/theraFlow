@@ -95,6 +95,24 @@ FOLLOW_UP_HEADERS: list[str] = [
     "Status",
 ]
 
+CONVERSATION_LOG_COLUMNS: list[str] = [
+    "timestamp",
+    "phone_number",
+    "whatsapp_name",
+    "step",
+    "direction",
+    "content",
+]
+
+CONVERSATION_LOG_HEADERS: list[str] = [
+    "Data/Hora",
+    "Telefone",
+    "Nome WhatsApp",
+    "Etapa",
+    "Direção",
+    "Conteúdo",
+]
+
 
 # ---------------------------------------------------------------------------
 # Scoring helper
@@ -250,8 +268,10 @@ class SheetsClient:
         self._spreadsheet = self._gc.open_by_key(self._sheet_id)
         self._worksheet = self._spreadsheet.sheet1
         self._follow_up_worksheet = self._get_or_create_follow_up_sheet()
+        self._conversation_log_worksheet = self._get_or_create_conversation_log_sheet()
         self._ensure_headers()
         self._ensure_follow_up_headers()
+        self._ensure_conversation_log_headers()
         log.info(
             "sheets_client_initialized",
             sheet_id=sheet_id,
@@ -262,6 +282,17 @@ class SheetsClient:
     # Private helpers (synchronous — run in executor)
     # ------------------------------------------------------------------
 
+    def _get_or_create_conversation_log_sheet(self) -> gspread.Worksheet:
+        """Get or create the 'Conversation Log' worksheet tab."""
+        try:
+            return self._spreadsheet.worksheet("Conversation Log")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = self._spreadsheet.add_worksheet(
+                title="Conversation Log", rows=5000, cols=len(CONVERSATION_LOG_COLUMNS),
+            )
+            log.info("sheets_conversation_log_tab_created")
+            return ws
+
     def _get_or_create_follow_up_sheet(self) -> gspread.Worksheet:
         """Get or create the 'Follow Up' worksheet tab."""
         try:
@@ -270,6 +301,23 @@ class SheetsClient:
             ws = self._spreadsheet.add_worksheet(title="Follow Up", rows=1000, cols=len(FOLLOW_UP_COLUMNS))
             log.info("sheets_follow_up_tab_created")
             return ws
+
+    def _ensure_conversation_log_headers(self) -> None:
+        """Write column headers to row 1 of Conversation Log sheet if empty."""
+        try:
+            first_row = self._conversation_log_worksheet.row_values(1)
+            if not first_row:
+                self._conversation_log_worksheet.append_row(
+                    CONVERSATION_LOG_HEADERS, value_input_option="USER_ENTERED",
+                )
+                self._conversation_log_worksheet.format("1:1", {
+                    "textFormat": {"bold": True},
+                    "backgroundColor": {"red": 0.92, "green": 0.94, "blue": 0.98},
+                })
+                self._conversation_log_worksheet.freeze(rows=1)
+                log.info("sheets_conversation_log_headers_written")
+        except Exception:
+            log.warning("sheets_conversation_log_headers_check_failed")
 
     def _ensure_follow_up_headers(self) -> None:
         """Write column headers to row 1 of Follow Up sheet if empty."""
@@ -313,6 +361,7 @@ class SheetsClient:
         self._spreadsheet = self._gc.open_by_key(self._sheet_id)
         self._worksheet = self._spreadsheet.sheet1
         self._follow_up_worksheet = self._get_or_create_follow_up_sheet()
+        self._conversation_log_worksheet = self._get_or_create_conversation_log_sheet()
 
     def _append_row(self, row: list[str | int]) -> None:
         """Synchronously append *row* to the first worksheet.
@@ -333,6 +382,15 @@ class SheetsClient:
             log.warning("sheets_reauthorizing", reason="APIError on append_row")
             self._reauthorize()
             self._worksheet.append_row(row, value_input_option="USER_ENTERED")
+
+    def _append_conversation_log_row(self, row: list[str]) -> None:
+        """Synchronously append *row* to the Conversation Log worksheet."""
+        try:
+            self._conversation_log_worksheet.append_row(row, value_input_option="USER_ENTERED")
+        except gspread.exceptions.APIError:
+            log.warning("sheets_reauthorizing", reason="APIError on conversation_log append_row")
+            self._reauthorize()
+            self._conversation_log_worksheet.append_row(row, value_input_option="USER_ENTERED")
 
     def _append_follow_up_row(self, row: list[str]) -> None:
         """Synchronously append *row* to the Follow Up worksheet."""
@@ -368,6 +426,34 @@ class SheetsClient:
             score=lead.score,
             priority=lead.status,
         )
+
+    async def log_conversation(
+        self,
+        phone: str,
+        name: str,
+        step: str,
+        direction: str,
+        content: str,
+    ) -> None:
+        """Append a conversation log entry to the Conversation Log sheet.
+
+        Args:
+            phone: E.164 phone number.
+            name: WhatsApp display name.
+            step: Current conversation step.
+            direction: ``"in"`` for user messages, ``"out"`` for bot responses.
+            content: Message text (truncated to 500 chars).
+        """
+        row = [
+            datetime.now(UTC).isoformat(),
+            phone,
+            name,
+            step,
+            direction,
+            content[:500],
+        ]
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._append_conversation_log_row, row)
 
     async def write_follow_up(self, follow_up: FollowUpData) -> None:
         """Append a follow-up record to the Follow Up tab."""

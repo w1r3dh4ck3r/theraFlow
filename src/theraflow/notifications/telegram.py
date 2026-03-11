@@ -121,9 +121,9 @@ class TelegramNotifier:
         header = "🔴 <b>LEAD URGENTE — QUER AGENDAR!</b>" if priority == "Hot" else "🟢 <b>Novo lead theraFlow</b>"
         from urllib.parse import quote
         greeting = quote(
-            f"Olá {lead.whatsapp_name}, aqui é a Karoline Jangola. "
-            f"Recebi seu contato e gostaria de agendar sua primeira sessão. "
-            f"Qual horário seria melhor para você?"
+            f"Olá, {lead.whatsapp_name}. Acabei de receber seu contato. "
+            f"Você gostaria de falar um pouco sobre o que te incomoda "
+            f"e te faz buscar por terapia nesse momento?"
         )
         wa_link = f"https://wa.me/{lead.phone_number}?text={greeting}"
 
