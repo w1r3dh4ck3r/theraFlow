@@ -99,7 +99,10 @@ class UserSession(BaseModel):
             Advances with each valid response.
         collected_data: Answers gathered so far, keyed by
             :attr:`~theraflow.conversation.flow.StepConfig.data_key`.
-        created_at: UTC timestamp of session creation.
+        created_at: UTC timestamp of session creation (immutable; for audit).
+        last_activity_at: UTC timestamp of the most recent inbound message.
+            Refreshed on every call to :meth:`ConversationEngine.handle_message`
+            and used by the TTL eviction logic.
     """
 
     phone: str
@@ -107,6 +110,9 @@ class UserSession(BaseModel):
     current_step: Step
     collected_data: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC)
+    )
+    last_activity_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC)
     )
 
@@ -192,6 +198,11 @@ class ConversationEngine:
         inbound_text = button_title or text or ""
 
         session = self._sessions.get(phone)
+
+        # Refresh activity timestamp for every inbound message so TTL eviction
+        # is based on idleness rather than session age.
+        if session is not None:
+            session.last_activity_at = datetime.now(UTC)
 
         # ----------------------------------------------------------------
         # New contact — create session and return the greeting prompt
@@ -328,16 +339,17 @@ class ConversationEngine:
         are cleaned up lazily rather than via a background timer.
 
         Eviction order:
-        1. Remove every session whose ``created_at`` is older than
-           :data:`SESSION_TTL_SECONDS` seconds ago.
+        1. Remove every session whose ``last_activity_at`` is older than
+           :data:`SESSION_TTL_SECONDS` seconds ago (idle TTL, not session age).
         2. If the store still holds >= :data:`MAX_SESSIONS` entries, drop the
-           single oldest session (LRU by ``created_at``) to make room.
+           single least-recently-active session (LRU by ``last_activity_at``)
+           to make room.
         """
         cutoff = datetime.now(UTC).timestamp() - SESSION_TTL_SECONDS
         stale_keys = [
             phone
             for phone, session in self._sessions.items()
-            if session.created_at.timestamp() < cutoff
+            if session.last_activity_at.timestamp() < cutoff
         ]
         for phone in stale_keys:
             self._sessions.pop(phone, None)
@@ -345,7 +357,7 @@ class ConversationEngine:
 
         if len(self._sessions) >= MAX_SESSIONS:
             oldest_phone = min(
-                self._sessions, key=lambda p: self._sessions[p].created_at
+                self._sessions, key=lambda p: self._sessions[p].last_activity_at
             )
             self._sessions.pop(oldest_phone)
             log.info("conversation_session_lru_evicted", phone=oldest_phone)
