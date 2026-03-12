@@ -27,9 +27,16 @@ class Step(StrEnum):
     GREETING = "GREETING"
     WHO_FOR = "WHO_FOR"
     GENDER = "GENDER"
+    AGE_GROUP = "AGE_GROUP"
+    CITY = "CITY"
+    FORMAT = "FORMAT"
+    FIRST_THERAPY = "FIRST_THERAPY"
     TOPIC = "TOPIC"
-    TERMS = "TERMS"
-    SCHEDULING = "SCHEDULING"
+    URGENCY = "URGENCY"
+    PREFERRED_TIME = "PREFERRED_TIME"
+    APPOINTMENT_INTENT = "APPOINTMENT_INTENT"
+    OPTIONAL_NOTE = "OPTIONAL_NOTE"
+    CONSENT = "CONSENT"
     CLOSING = "CLOSING"
     # Terminal / special-case states (not part of the main STEP_ORDER list)
     HUMAN_HANDOFF = "HUMAN_HANDOFF"
@@ -106,7 +113,13 @@ class StepConfig:
         button_title: str | None,
     ) -> str | None:
         """Normalise raw inbound input to a canonical option value."""
-        if self.use_buttons or self.use_list:
+        if self.use_buttons:
+            return self._resolve_button_answer(text, button_id, button_title)
+        if self.use_list:
+            # Try 1-based numeric index first, then fall back to text matching.
+            answer = self._resolve_list_answer(text)
+            if answer is not None:
+                return answer
             return self._resolve_button_answer(text, button_id, button_title)
         if self.accepts_free_text:
             stripped = (text or "").strip()
@@ -164,6 +177,26 @@ class StepConfig:
 # Special-case constants
 # ---------------------------------------------------------------------------
 
+#: Option label used at GREETING to request a human agent.
+HUMAN_HANDOFF_OPTION: str = "Falar com alguém"
+
+#: Option label used at CONSENT to decline data processing.
+CONSENT_DECLINE_OPTION: str = "Não"
+
+#: Keyword at OPTIONAL_NOTE that skips the free-text step.
+OPTIONAL_NOTE_SKIP_KEYWORD: str = "pular"
+
+HUMAN_HANDOFF_MESSAGE: str = (
+    "Vou te conectar com um de nossos atendentes.\n\n"
+    "Em breve alguém entrará em contato com você. Até logo!"
+)
+
+LGPD_DECLINED_MESSAGE: str = (
+    "Entendemos sua escolha. Seus dados não serão armazenados.\n\n"
+    "Caso mude de ideia, pode nos contatar novamente. Até logo!"
+)
+
+# Kept for backward compatibility / other callers.
 DECLINE_OPTION: str = "Não concordo"
 ACCEPT_OPTION: str = "Concordo"
 
@@ -195,16 +228,16 @@ INVALID_INPUT_MESSAGE: str = (
 STEP_CONFIGS: dict[Step, StepConfig] = {
     Step.GREETING: StepConfig(
         prompt=(
-            "Olá! A Karoline Jangola agradece o seu contato.\n\n"
+            "Olá! Sou o assistente virtual da Karoline Jangola.\n\n"
             "Vou fazer algumas perguntas rápidas para entender "
-            "como podemos ajudar. Vamos lá?"
+            "como podemos ajudar. Posso continuar?"
         ),
-        options=["Vamos"],
+        options=["Sim", HUMAN_HANDOFF_OPTION],
         data_key=None,
     ),
     Step.WHO_FOR: StepConfig(
         prompt="Para quem seria o atendimento?",
-        options=["Para mim", "Para meu filho(a)", "Outro familiar"],
+        options=["Para mim", "Para meu filho(a)", "Outro familiar", "Outra pessoa"],
         data_key="who_for",
     ),
     Step.GENDER: StepConfig(
@@ -214,6 +247,34 @@ STEP_CONFIGS: dict[Step, StepConfig] = {
         ),
         options=["Mulher", "Homem", "Prefiro não informar"],
         data_key="gender",
+    ),
+    Step.AGE_GROUP: StepConfig(
+        prompt="Qual é a faixa etária da pessoa que receberá o atendimento?",
+        options=[
+            "Menor de 12",
+            "12\u201317",
+            "18\u201324",
+            "25\u201334",
+            "35\u201344",
+            "45\u201354",
+            "55 ou mais",
+        ],
+        data_key="age_group",
+    ),
+    Step.CITY: StepConfig(
+        prompt="Em qual cidade você está localizado(a)?",
+        accepts_free_text=True,
+        data_key="city",
+    ),
+    Step.FORMAT: StepConfig(
+        prompt="Qual formato de atendimento você prefere?",
+        options=["Online", "Presencial", "Indiferente"],
+        data_key="format",
+    ),
+    Step.FIRST_THERAPY: StepConfig(
+        prompt="Esta seria sua primeira experiência com psicoterapia?",
+        options=["Sim", "Não"],
+        data_key="first_therapy",
     ),
     Step.TOPIC: StepConfig(
         prompt=(
@@ -230,24 +291,43 @@ STEP_CONFIGS: dict[Step, StepConfig] = {
         ],
         data_key="topic",
     ),
-    Step.TERMS: StepConfig(
-        prompt=(
-            "Nosso atendimento social tem o valor de R$ 60,00 "
-            "por sessão e funciona exclusivamente no turno da tarde.\n\n"
-            "Você concorda com essas condições?"
-        ),
-        options=[ACCEPT_OPTION, DECLINE_OPTION],
-        data_key="terms_agreement",
-    ),
-    Step.SCHEDULING: StepConfig(
+    Step.URGENCY: StepConfig(
         prompt="Para quando gostaria de iniciar sua terapia?",
         options=[
             "O quanto antes",
             "Nesta semana",
             "Neste mês",
-            SCHEDULING_DECLINE_OPTION,
+            "Ainda estou pensando",
         ],
-        data_key="scheduling",
+        data_key="urgency",
+    ),
+    Step.PREFERRED_TIME: StepConfig(
+        prompt="Qual período do dia é melhor para você?",
+        options=["Manhã", "Tarde", "Noite", "Indiferente"],
+        data_key="preferred_time",
+    ),
+    Step.APPOINTMENT_INTENT: StepConfig(
+        prompt="Gostaria de agendar uma sessão experimental?",
+        options=["Sim", "Ainda estou pensando"],
+        data_key="appointment_interest",
+    ),
+    Step.OPTIONAL_NOTE: StepConfig(
+        prompt=(
+            "Há algo mais que queira compartilhar antes de finalizarmos?\n\n"
+            "(Digite sua mensagem ou envie *pular* para continuar.)"
+        ),
+        accepts_free_text=True,
+        data_key="note",
+    ),
+    Step.CONSENT: StepConfig(
+        prompt=(
+            "Para prosseguir, precisamos do seu consentimento para "
+            "armazenar seus dados conforme a LGPD.\n\n"
+            "Você autoriza o uso dos seus dados para fins de "
+            "agendamento de consultas?"
+        ),
+        options=["Sim", CONSENT_DECLINE_OPTION],
+        data_key="consent",
     ),
     Step.CLOSING: StepConfig(
         prompt=(
@@ -270,9 +350,16 @@ STEP_ORDER: list[Step] = [
     Step.GREETING,
     Step.WHO_FOR,
     Step.GENDER,
+    Step.AGE_GROUP,
+    Step.CITY,
+    Step.FORMAT,
+    Step.FIRST_THERAPY,
     Step.TOPIC,
-    Step.TERMS,
-    Step.SCHEDULING,
+    Step.URGENCY,
+    Step.PREFERRED_TIME,
+    Step.APPOINTMENT_INTENT,
+    Step.OPTIONAL_NOTE,
+    Step.CONSENT,
     Step.CLOSING,
 ]
 
