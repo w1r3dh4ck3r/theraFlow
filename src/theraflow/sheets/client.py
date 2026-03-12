@@ -15,7 +15,7 @@ Typical usage::
         sheet_id=settings.google_sheets_id,
     )
 
-    score, priority = calculate_score(collected_data)
+    score, lead_quality = calculate_score(collected_data)
     lead = LeadData(score=score, status="new", **fields)
     await client.write_lead(lead)
 """
@@ -62,6 +62,10 @@ COLUMNS: list[str] = [
     "consent",
     "score",
     "status",
+    "lead_quality",
+    "risk_level",
+    "intent",
+    "confidence",
 ]
 
 COLUMN_HEADERS: list[str] = [
@@ -83,6 +87,10 @@ COLUMN_HEADERS: list[str] = [
     "Consentimento LGPD",
     "Pontuação",
     "Status",
+    "Qualidade do Lead",
+    "Nível de Risco",
+    "Intenção",
+    "Confiança",
 ]
 
 FOLLOW_UP_COLUMNS: list[str] = [
@@ -132,51 +140,119 @@ CONVERSATION_LOG_HEADERS: list[str] = [
 # Scoring helper
 # ---------------------------------------------------------------------------
 
+# Topic values considered too generic to award the clear-pain signal.
+_VAGUE_TOPICS: frozenset[str] = frozenset({
+    "ok", "sim", "não", "nao", "ajuda", "help", "outro", "outros", "other",
+    "nada", "tudo", "etc", "geral", "normal", "qualquer",
+})
+
 
 def calculate_score(data: dict[str, Any]) -> tuple[int, str]:
-    """Calculate a lead priority score from collected conversation data.
+    """Calculate a multi-axis lead quality score from collected conversation data.
 
-    Scoring rules (additive):
+    Scoring axes (additive):
 
-    * ``appointment_interest == "Sim"`` → **+3**
-    * ``urgency == "O quanto antes"`` → **+2**
-    * ``note`` is non-empty → **+1**
+    * Clear topic/pain demonstrated → **+20**
+    * Name and phone number provided → **+15**
+    * Scheduling or pricing interest shown → **+20**
+    * Terms accepted (afternoon + R$60) → **+15**
+    * Agreed to schedule soon → **+20**
+    * Vague / single-word responses throughout → **-10**
+    * Completed the full flow → **+10**
 
-    Priority labels by total score:
+    ``lead_quality`` label by total score:
 
-    * **0-2** → ``"Low"``
-    * **3-4** → ``"Warm"``
-    * **5+**  → ``"Hot"``
+    * **< 30**  → ``"cold"``
+    * **30-59** → ``"warm"``
+    * **60+**   → ``"hot"``
 
     Args:
         data: Collected lead data keyed by conversation ``data_key`` values.
 
     Returns:
-        A ``(score, priority)`` tuple where *score* is the integer point total
-        and *priority* is one of ``"Low"``, ``"Warm"``, or ``"Hot"``.
+        A ``(score, lead_quality)`` tuple where *score* is the integer point
+        total and *lead_quality* is one of ``"cold"``, ``"warm"``, or ``"hot"``.
     """
     score = 0
 
-    if data.get("appointment_interest") == "Sim":
-        score += 3
+    topic: str = data.get("topic", "") or ""
+    urgency: str = data.get("urgency", "") or ""
+    appointment: str = data.get("appointment_interest", "") or ""
+    whatsapp_name: str = data.get("whatsapp_name", "") or ""
+    phone_number: str = data.get("phone_number", "") or ""
 
-    urgency = data.get("urgency", "")
-    if urgency == "O quanto antes":
-        score += 2
-    elif urgency == "Nesta semana":
-        score += 1
+    # +20: demonstrated clear pain / topic
+    if topic and topic.lower() not in _VAGUE_TOPICS and len(topic) > 2:
+        score += 20
 
+    # +15: provided name and contact number
+    if whatsapp_name and phone_number:
+        score += 15
+
+    # +20: expressed interest in scheduling
+    if urgency in ("O quanto antes", "Nesta semana", "Neste mês"):
+        score += 20
+
+    # +15: wants to book appointment
+    if appointment == "Sim":
+        score += 15
+
+    # +20: committed to starting soon
+    if urgency in ("O quanto antes", "Nesta semana"):
+        score += 20
+
+    # +10: provided a personal note
     if data.get("note"):
-        score += 1
+        score += 10
 
-    if score >= 5:
-        priority = "Hot"
-    elif score >= 3:
-        priority = "Warm"
+    # -10: vague / single-word answers across multiple fields
+    vague_count = sum(
+        1
+        for v in data.values()
+        if isinstance(v, str) and 0 < len(v.strip()) <= 2
+    )
+    if vague_count >= 2:
+        score -= 10
+
+    if score >= 60:
+        lead_quality = "hot"
+    elif score >= 30:
+        lead_quality = "warm"
     else:
-        priority = "Low"
+        lead_quality = "cold"
 
-    return score, priority
+    return score, lead_quality
+
+
+def derive_intent(data: dict[str, Any]) -> str:
+    """Derive the user's primary intent from collected conversation data.
+
+    Returns:
+        * ``"crisis"``  — if ``risk_level`` is set to anything other than
+          ``"none"`` (highest priority; checked first).
+        * ``"booking"`` — if the user accepted a scheduling option (i.e.
+          ``scheduling`` is present and is not ``"Ainda estou pensando"``).
+        * ``"info"``    — if a topic was provided but scheduling was explicitly
+          declined (``"Ainda estou pensando"``).
+        * ``"unclear"`` — fallback when intent cannot be determined.
+
+    Args:
+        data: Collected lead data keyed by conversation ``data_key`` values.
+    """
+    risk_level: str = data.get("risk_level", "none") or "none"
+    urgency: str = data.get("urgency", "") or ""
+    topic: str = data.get("topic", "") or ""
+
+    if risk_level != "none":
+        return "crisis"
+
+    if urgency and urgency != "Ainda estou pensando":
+        return "booking"
+
+    if topic and urgency == "Ainda estou pensando":
+        return "info"
+
+    return "unclear"
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +304,10 @@ class LeadData(BaseModel):
     consent: str
     score: int
     status: str = "new"
+    lead_quality: str = "cold"
+    risk_level: str = "none"
+    intent: str = "unclear"
+    confidence: float = 0.0
 
     def to_row(self) -> list[str | int]:
         """Return an ordered list of values matching :data:`COLUMNS`.

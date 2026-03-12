@@ -131,15 +131,16 @@ class TelegramNotifier:
             lead: A fully-populated :class:`~theraflow.sheets.client.LeadData`
                 instance representing the new lead.
         """
-        _, priority = calculate_score(lead.model_dump())
-        text = self._format_message(lead, priority)
+        _, lead_quality = calculate_score(lead.model_dump())
+        text = self._format_message(lead, lead_quality)
 
         log.info(
             "telegram_notify_attempt",
             lead_id=lead.lead_id,
             phone=mask_phone(lead.phone_number),
             score=lead.score,
-            priority=priority,
+            lead_quality=lead_quality,
+            risk_level=lead.risk_level,
         )
 
         try:
@@ -170,22 +171,81 @@ class TelegramNotifier:
                 phone=mask_phone(lead.phone_number),
             )
 
+    async def send_crisis_alert(
+        self,
+        phone: str,
+        risk_level: str,
+        matched_terms: list[str],
+    ) -> None:
+        """Send an immediate crisis alert to the configured Telegram chat.
+
+        Intended to be called *during* the conversation flow (not at
+        completion) so the therapist is notified as early as possible when
+        risk-related language is detected.  The method is fire-and-forget:
+        all errors are caught and logged without re-raising so the calling
+        flow is never interrupted.
+
+        Args:
+            phone: E.164 phone number of the user (without leading ``+``).
+            risk_level: Severity label detected by the risk classifier
+                (e.g. ``"high"``, ``"medium"``).
+            matched_terms: List of risk-related terms that triggered the alert.
+        """
+        wa_link = f"https://wa.me/{phone}"
+        terms_str = ", ".join(matched_terms) if matched_terms else "—"
+        text = (
+            "🚨 <b>ALERTA DE CRISE</b>\n\n"
+            f"<b>Telefone:</b> <a href=\"{wa_link}\">{phone}</a>\n"
+            f"<b>Nível de risco:</b> {risk_level}\n"
+            f"<b>Termos detectados:</b> {terms_str}"
+        )
+
+        log.warning(
+            "telegram_crisis_alert_attempt",
+            phone=mask_phone(phone),
+            risk_level=risk_level,
+            matched_terms=matched_terms,
+        )
+
+        try:
+            await self._post_message(text)
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "telegram_crisis_alert_error",
+                phone=mask_phone(phone),
+                error=str(exc),
+            )
+        else:
+            log.warning(
+                "telegram_crisis_alert_sent",
+                phone=mask_phone(phone),
+                risk_level=risk_level,
+            )
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _format_message(lead: LeadData, priority: str) -> str:
+    def _format_message(lead: LeadData, lead_quality: str) -> str:
         """Build the HTML-formatted notification message in Portuguese."""
-        urgency_map = {
-            "Hot": "URGENTE",
-            "Warm": "Moderada",
-            "Low": "Baixa",
-        }
-        urgency_label = urgency_map.get(priority, priority)
-
-        header = "🔴 <b>LEAD URGENTE — QUER AGENDAR!</b>" if priority == "Hot" else "🟢 <b>Novo lead theraFlow</b>"
         from urllib.parse import quote
+
+        urgency_map = {
+            "hot": "URGENTE",
+            "warm": "Moderada",
+            "cold": "Baixa",
+        }
+        urgency_label = urgency_map.get(lead_quality, lead_quality)
+
+        # Header precedence: risk > hot lead > default
+        if lead.risk_level != "none":
+            header = "🚨 <b>URGENTE — RISCO DETECTADO</b>"
+        elif lead.lead_quality == "hot":
+            header = "🔥 <b>LEAD QUENTE</b>"
+        else:
+            header = "🟢 <b>Novo lead theraFlow</b>"
+
         greeting = quote(
             f"Olá, {lead.whatsapp_name}. Acabei de receber seu contato. "
             f"Você gostaria de falar um pouco sobre o que te incomoda "
@@ -202,7 +262,9 @@ class TelegramNotifier:
             f"<b>Tema:</b> {lead.topic}\n"
             f"<b>Condições (R$60 + tarde):</b> {lead.terms_agreement}\n"
             f"<b>Quando quer iniciar:</b> {lead.scheduling}\n\n"
-            f"<b>Prioridade:</b> {urgency_label} ({lead.score} pts)"
+            f"<b>Prioridade:</b> {urgency_label} ({lead.score} pts)\n"
+            f"<b>Qualidade do lead:</b> {lead.lead_quality}\n"
+            f"<b>Nível de risco:</b> {lead.risk_level}"
         )
 
     async def _post_message(self, text: str) -> None:
