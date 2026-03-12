@@ -86,18 +86,16 @@ class WebhookClient:
         )
 
 
-# Full happy path answers.
-# The FIRST message to a new contact always creates a session and returns the
-# GREETING prompt — the message content is NOT processed as an answer.  So the
-# flow is: trigger → answer GREETING → answer WHO_FOR → … → answer CONSENT.
+# Full happy path using natural free-text conversation.
+# GENDER keeps buttons.
 HAPPY_PATH_STEPS = [
-    ("text", "oi"),                                      # Trigger → GREETING prompt
-    ("button", "opt_0", "Vamos"),                        # GREETING → Vamos
-    ("button", "opt_0", "Para mim"),                     # WHO_FOR → Para mim
-    ("button", "opt_0", "Mulher"),                       # GENDER → Mulher
-    ("list", "opt_0", "Ansiedade"),                      # TOPIC → Ansiedade
-    ("button", "opt_0", "Concordo"),                     # TERMS → Concordo
-    ("list", "opt_0", "O quanto antes"),                 # SCHEDULING → O quanto antes → CLOSING
+    ("text", "oi"),                                      # Trigger → GREETING
+    ("text", "Maria"),                                   # GREETING (name) → WHO_FOR
+    ("text", "Para mim"),                                # WHO_FOR → GENDER
+    ("button", "opt_0", "Mulher"),                       # GENDER (buttons) → FIRST_THERAPY
+    ("text", "Sim"),                                     # FIRST_THERAPY → TOPIC
+    ("text", "Ansiedade"),                               # TOPIC → URGENCY
+    ("text", "O quanto antes"),                          # URGENCY → CLOSING
 ]
 
 
@@ -235,7 +233,7 @@ async def test_full_happy_path(sim):
     whatsapp_calls = [c for c in outbound if "graph.facebook.com" in c["url"]]
     telegram_calls = [c for c in outbound if "telegram" in c["url"]]
 
-    assert len(whatsapp_calls) >= 7, f"Expected >=7 WhatsApp calls, got {len(whatsapp_calls)}"
+    assert len(whatsapp_calls) >= 6, f"Expected >=6 WhatsApp calls, got {len(whatsapp_calls)}"
     assert len(telegram_calls) == 1, f"Expected 1 Telegram call, got {len(telegram_calls)}"
 
     tg_payload = telegram_calls[0].get("json", {})
@@ -246,24 +244,6 @@ async def test_full_happy_path(sim):
 
 
 @pytest.mark.asyncio
-async def test_terms_declined(sim):
-    """Decline terms (R$60 + afternoon) → end flow, no Telegram."""
-    client, outbound = sim
-    wh = WebhookClient(client)
-    sender = "5511999990002"
-
-    # Run through to TERMS
-    await _run_steps(wh, sender, HAPPY_PATH_STEPS[:5])
-
-    # Decline terms
-    resp = await wh.send_button(sender, "opt_1", "Não concordo")
-    assert resp.status_code == 200
-
-    telegram_calls = [c for c in outbound if "telegram" in c["url"]]
-    assert len(telegram_calls) == 0
-
-
-@pytest.mark.asyncio
 async def test_concurrent_users(sim):
     """Two users interleaved — independent sessions."""
     client, _ = sim
@@ -271,26 +251,24 @@ async def test_concurrent_users(sim):
 
     assert (await wh.send_text("5511000000001", "oi")).status_code == 200
     assert (await wh.send_text("5511000000002", "oi")).status_code == 200
-    assert (await wh.send_button("5511000000001", "opt_0", "OK")).status_code == 200
-    assert (await wh.send_button("5511000000002", "opt_0", "OK")).status_code == 200
-    assert (await wh.send_text("5511000000001", "1")).status_code == 200
-    assert (await wh.send_text("5511000000002", "2")).status_code == 200
+    assert (await wh.send_text("5511000000001", "Maria")).status_code == 200
+    assert (await wh.send_text("5511000000002", "João")).status_code == 200
+    assert (await wh.send_text("5511000000001", "Para mim")).status_code == 200
+    assert (await wh.send_text("5511000000002", "Para mim")).status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_invalid_input_reprompt(sim):
-    """Invalid button → reprompt; valid → advances."""
+async def test_handoff_keyword(sim):
+    """Typing 'falar com alguém' triggers handoff at any step."""
     client, outbound = sim
     wh = WebhookClient(client)
     sender = "5511999990005"
 
     assert (await wh.send_text(sender, "oi")).status_code == 200
-    assert (await wh.send_button(sender, "opt_99", "bogus")).status_code == 200
-    assert (await wh.send_button(sender, "opt_0", "OK")).status_code == 200
-    assert (await wh.send_text(sender, "1")).status_code == 200
+    assert (await wh.send_text(sender, "quero falar com alguém")).status_code == 200
 
-    whatsapp_calls = [c for c in outbound if "graph.facebook.com" in c["url"]]
-    assert len(whatsapp_calls) >= 5
+    telegram_calls = [c for c in outbound if "telegram" in c["url"]]
+    assert len(telegram_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -315,7 +293,7 @@ async def test_full_happy_path_with_sheets(sim_with_sheets):
 
     assert "Para mim" in row
     assert "Mulher" in row
-    assert "Sim" in row
+    assert "Ansiedade" in row
 
     # Clean up: delete the test row
     for i, r in enumerate(rows):
@@ -327,21 +305,18 @@ async def test_full_happy_path_with_sheets(sim_with_sheets):
 
 
 @pytest.mark.asyncio
-async def test_scheduling_declined(sim):
-    """'Não quero iniciar agora' → Follow Up sheet, no Telegram."""
+async def test_urgency_declined(sim):
+    """'Ainda estou pensando' at URGENCY → continues flow but scores lower."""
     client, outbound = sim
     wh = WebhookClient(client)
     sender = "5511999990006"
 
-    # Run through to SCHEDULING (trigger through TERMS)
+    # Run through to URGENCY (6 steps: trigger + name + WHO_FOR + GENDER + FIRST_THERAPY + TOPIC answer)
     await _run_steps(wh, sender, HAPPY_PATH_STEPS[:6])
 
-    # Decline scheduling — "Ainda estou pensando" is opt_3
-    resp = await wh.send_list_reply(sender, "opt_3", "Ainda estou pensando")
+    # Type "Ainda estou pensando" at URGENCY (natural step)
+    resp = await wh.send_text(sender, "Ainda estou pensando")
     assert resp.status_code == 200
-
-    telegram_calls = [c for c in outbound if "telegram" in c["url"]]
-    assert len(telegram_calls) == 0
 
 
 @pytest.mark.asyncio
@@ -349,31 +324,30 @@ async def test_score_calculation():
     """Multi-axis lead quality scoring."""
     from theraflow.sheets.client import calculate_score
 
-    # scheduling only: interest (+20) + agreed (+20) + completed (+10) = 50 → warm
-    assert calculate_score({"scheduling": "O quanto antes"}) == (50, "warm")
-    assert calculate_score({"scheduling": "Nesta semana"}) == (50, "warm")
+    # urgency only: interest (+20) + agreed (+20) = 40 → warm
+    assert calculate_score({"urgency": "O quanto antes"}) == (40, "warm")
+    assert calculate_score({"urgency": "Nesta semana"}) == (40, "warm")
 
-    # scheduling but not committed: interest (+20) + completed (+10) = 30 → warm
-    assert calculate_score({"scheduling": "Neste mês"}) == (30, "warm")
+    # urgency but not committed: interest (+20) = 20 → cold
+    assert calculate_score({"urgency": "Neste mês"}) == (20, "cold")
 
     # no data → cold
     assert calculate_score({}) == (0, "cold")
 
     # full hot lead: clear topic (+20) + name+phone (+15) + interest (+20)
-    #               + terms (+15) + agreed (+20) + completed (+10) = 100 → hot
+    #               + agreed (+20) = 75 → hot
     hot_data = {
         "topic": "ansiedade e estresse no trabalho",
         "whatsapp_name": "Maria",
         "phone_number": "5511999990000",
-        "scheduling": "O quanto antes",
-        "terms_agreement": "Concordo",
+        "urgency": "O quanto antes",
     }
     score, quality = calculate_score(hot_data)
     assert quality == "hot"
-    assert score == 100
+    assert score == 75
 
     # vague responses penalty applies when >=2 values are <=2 chars
-    vague_data = {"who_for": "eu", "gender": "M", "scheduling": "Neste mês"}
+    vague_data = {"who_for": "eu", "gender": "M", "urgency": "Neste mês"}
     score_vague, _ = calculate_score(vague_data)
-    score_clean, _ = calculate_score({"scheduling": "Neste mês"})
+    score_clean, _ = calculate_score({"urgency": "Neste mês"})
     assert score_vague == score_clean - 10

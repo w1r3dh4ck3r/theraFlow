@@ -50,16 +50,9 @@ COLUMNS: list[str] = [
     "phone_number",
     "who_for",
     "gender",
-    "age_group",
-    "city",
-    "format",
     "first_therapy",
     "topic",
     "urgency",
-    "preferred_time",
-    "appointment_interest",
-    "note",
-    "consent",
     "score",
     "status",
     "lead_quality",
@@ -75,16 +68,9 @@ COLUMN_HEADERS: list[str] = [
     "Telefone",
     "Para quem",
     "Gênero",
-    "Faixa etária",
-    "Cidade",
-    "Formato",
     "Primeira terapia",
     "Tema",
     "Urgência",
-    "Horário preferido",
-    "Interesse em agendar",
-    "Observação",
-    "Consentimento LGPD",
     "Pontuação",
     "Status",
     "Qualidade do Lead",
@@ -124,6 +110,7 @@ CONVERSATION_LOG_COLUMNS: list[str] = [
     "step",
     "direction",
     "content",
+    "bot_action",
 ]
 
 CONVERSATION_LOG_HEADERS: list[str] = [
@@ -133,6 +120,7 @@ CONVERSATION_LOG_HEADERS: list[str] = [
     "Etapa",
     "Direção",
     "Conteúdo",
+    "Ação do Bot",
 ]
 
 
@@ -177,7 +165,6 @@ def calculate_score(data: dict[str, Any]) -> tuple[int, str]:
 
     topic: str = data.get("topic", "") or ""
     urgency: str = data.get("urgency", "") or ""
-    appointment: str = data.get("appointment_interest", "") or ""
     whatsapp_name: str = data.get("whatsapp_name", "") or ""
     phone_number: str = data.get("phone_number", "") or ""
 
@@ -193,17 +180,9 @@ def calculate_score(data: dict[str, Any]) -> tuple[int, str]:
     if urgency in ("O quanto antes", "Nesta semana", "Neste mês"):
         score += 20
 
-    # +15: wants to book appointment
-    if appointment == "Sim":
-        score += 15
-
     # +20: committed to starting soon
     if urgency in ("O quanto antes", "Nesta semana"):
         score += 20
-
-    # +10: provided a personal note
-    if data.get("note"):
-        score += 10
 
     # -10: vague / single-word answers across multiple fields
     vague_count = sum(
@@ -272,16 +251,9 @@ class LeadData(BaseModel):
         phone_number: E.164 phone number without the leading ``+``.
         who_for: Who the therapy is intended for.
         gender: Reported gender.
-        age_group: Age group bucket.
-        city: City of residence.
-        format: Preferred therapy format (e.g. online / presencial).
         first_therapy: Whether this is the contact's first time in therapy.
         topic: Main topic or concern to address.
         urgency: Desired start timeframe.
-        preferred_time: Preferred appointment time slot.
-        appointment_interest: Whether the contact wants to schedule an appointment.
-        note: Optional free-text note provided by the contact.
-        consent: LGPD consent response.
         score: Computed priority score (see :func:`calculate_score`).
         status: Lead status — defaults to ``"new"``.
     """
@@ -292,16 +264,9 @@ class LeadData(BaseModel):
     phone_number: str
     who_for: str
     gender: str
-    age_group: str
-    city: str
-    format: str
     first_therapy: str
     topic: str
     urgency: str
-    preferred_time: str
-    appointment_interest: str
-    note: str
-    consent: str
     score: int
     status: str = "new"
     lead_quality: str = "cold"
@@ -541,6 +506,7 @@ class SheetsClient:
         step: str,
         direction: str,
         content: str,
+        bot_action: str = "",
     ) -> None:
         """Append a conversation log entry to the Conversation Log sheet.
 
@@ -550,6 +516,7 @@ class SheetsClient:
             step: Current conversation step.
             direction: ``"in"`` for user messages, ``"out"`` for bot responses.
             content: Message text (truncated to 500 chars).
+            bot_action: What the bot did in response (e.g. ``"handoff_telegram_sent"``).
         """
         row = [
             datetime.now(UTC).isoformat(),
@@ -558,6 +525,7 @@ class SheetsClient:
             step,
             direction,
             content[:500],
+            bot_action,
         ]
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._append_conversation_log_row, row)

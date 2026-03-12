@@ -19,6 +19,7 @@ os.environ.setdefault("GOOGLE_SERVICE_ACCOUNT_JSON",
                        os.path.join(os.path.dirname(__file__), "..", "secrets", "service-account.json"))
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123:test_token")
 os.environ.setdefault("TELEGRAM_CHAT_ID", "-1001234567890")
+os.environ["LLM_ENABLED"] = "false"  # Tests use deterministic hardcoded prompts
 
 import pytest
 from fastapi import FastAPI

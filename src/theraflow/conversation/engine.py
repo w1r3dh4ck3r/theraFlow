@@ -35,18 +35,16 @@ from pydantic import BaseModel, Field
 from theraflow.safety.detector import detect_risk
 from theraflow.safety.responses import CRISIS_MESSAGE_HIGH, CRISIS_MESSAGE_MEDIUM
 from theraflow.conversation.flow import (
-    CONSENT_DECLINE_OPTION,
     HUMAN_HANDOFF_MESSAGE,
-    HUMAN_HANDOFF_OPTION,
     INVALID_INPUT_MESSAGE,
-    LGPD_DECLINED_MESSAGE,
-    OPTIONAL_NOTE_SKIP_KEYWORD,
     STEP_CONFIGS,
     Step,
     StepConfig,
     next_step,
 )
 from theraflow.config import settings
+from theraflow.llm.service import classify_answer as llm_classify
+from theraflow.llm.service import extract_greeting_info as llm_extract_greeting
 from theraflow.llm.service import generate_response as llm_generate
 from theraflow.logging import get_logger
 from theraflow.sheets.client import LeadData, calculate_score, derive_intent
@@ -183,8 +181,7 @@ class ConversationEngine:
            step, store it in ``collected_data``, and advance to the next step.
         3. **Special branches**:
 
-           * GREETING + "Prefiro falar com uma pessoa" → human handoff.
-           * CONSENT + "Não" → discard all collected data (LGPD compliance).
+           * Handoff keyword at any step → human handoff.
 
         4. **CLOSING** — trigger lead-storage and assistant-notification hooks,
            return the closing message, and clean up the session.
@@ -257,7 +254,7 @@ class ConversationEngine:
             session.last_activity_at = datetime.now(UTC)
 
         # ----------------------------------------------------------------
-        # New contact — create session and return the greeting prompt
+        # New contact — greet and ask for name + who_for
         # ----------------------------------------------------------------
         if session is None:
             self._evict_stale_sessions()
@@ -274,9 +271,9 @@ class ConversationEngine:
                 name=name,
             )
             await self._log_conversation(phone, name, "GREETING", "in", inbound_text)
-            replies = await self._build_prompt(Step.GREETING, session)
-            await self._log_conversation(phone, name, "GREETING", "out", replies[0].text if replies else "")
-            return replies
+            greeting = await self._build_prompt(Step.GREETING, session)
+            await self._log_conversation(phone, name, "GREETING", "out", greeting[0].text if greeting else "")
+            return greeting
 
         # ----------------------------------------------------------------
         # Guard: ignore messages after the session has reached a terminal step
@@ -296,9 +293,75 @@ class ConversationEngine:
         await self._log_conversation(phone, session.whatsapp_name, current.value, "in", inbound_text)
 
         # ----------------------------------------------------------------
+        # Handoff detection — check for handoff keywords in any message
+        # ----------------------------------------------------------------
+        if self._is_handoff_request(inbound_text):
+            log.info("conversation_human_handoff", phone=mask_phone(phone))
+            await self._log_conversation(
+                phone, session.whatsapp_name, current.value, "out",
+                HUMAN_HANDOFF_MESSAGE, bot_action="handoff_telegram_sent",
+            )
+            if self._telegram_notifier is not None:
+                await self._telegram_notifier.send_handoff_alert(phone, session.whatsapp_name)
+            self._cleanup_session(phone)
+            return [OutgoingMessage(text=HUMAN_HANDOFF_MESSAGE)]
+
+        # ----------------------------------------------------------------
+        # Special branch: GREETING response — extract name + who_for
+        # ----------------------------------------------------------------
+        if current == Step.GREETING:
+            await self._handle_greeting_response(session, inbound_text)
+            if session.collected_data.get("who_for"):
+                # Got both name and who_for — skip to GENDER
+                session.current_step = Step.GENDER
+                log.info("conversation_step_advanced", phone=mask_phone(phone), from_step="GREETING", to_step="GENDER")
+                replies = await self._build_prompt(Step.GENDER, session, last_answer=inbound_text)
+            else:
+                # Got name only — ask WHO_FOR with personalized prompt
+                session.current_step = Step.WHO_FOR
+                log.info("conversation_step_advanced", phone=mask_phone(phone), from_step="GREETING", to_step="WHO_FOR")
+                replies = await self._build_prompt(Step.WHO_FOR, session, last_answer=inbound_text)
+            await self._log_conversation(phone, session.whatsapp_name, session.current_step.value, "out", replies[0].text if replies else "")
+            return replies
+
+        # ----------------------------------------------------------------
         # Resolve the user's answer
         # ----------------------------------------------------------------
         answer: str | None = config.resolve_answer(text, button_id, button_title)
+
+        # ----------------------------------------------------------------
+        # Natural steps: classify free-text via LLM when not an exact match
+        # ----------------------------------------------------------------
+        if config.natural and answer is not None and config.options and answer not in config.options:
+            if settings.llm_enabled and settings.openrouter_api_key:
+                classified = await llm_classify(
+                    api_key=settings.openrouter_api_key,
+                    model=settings.llm_model,
+                    step=current.value,
+                    options=config.options,
+                    user_text=answer,
+                    timeout=float(settings.llm_timeout_secs),
+                )
+                if classified:
+                    answer = classified
+                else:
+                    # LLM couldn't classify — reprompt
+                    log.debug("conversation_natural_unclear", phone=mask_phone(phone), step=current, text=answer)
+                    reprompt = await self._build_prompt(current, session)
+                    unclear_msg = "Desculpe, não consegui entender sua resposta. Poderia reformular?"
+                    replies = [OutgoingMessage(text=unclear_msg), *reprompt]
+                    await self._log_conversation(phone, session.whatsapp_name, current.value, "out", unclear_msg)
+                    return replies
+            else:
+                # LLM disabled — try fuzzy match, store raw text as fallback
+                lower = answer.lower()
+                matched = None
+                for opt in config.options:
+                    if opt.lower() in lower or lower in opt.lower():
+                        matched = opt
+                        break
+                if matched:
+                    answer = matched
 
         # ----------------------------------------------------------------
         # Invalid input — reprompt without advancing the step
@@ -315,30 +378,6 @@ class ConversationEngine:
             replies = [OutgoingMessage(text=INVALID_INPUT_MESSAGE), *reprompt]
             await self._log_conversation(phone, session.whatsapp_name, current.value, "out", INVALID_INPUT_MESSAGE)
             return replies
-
-        # ----------------------------------------------------------------
-        # Special branch: human handoff at GREETING
-        # ----------------------------------------------------------------
-        if current == Step.GREETING and answer == HUMAN_HANDOFF_OPTION:
-            log.info("conversation_human_handoff", phone=mask_phone(phone))
-            await self._log_conversation(phone, session.whatsapp_name, "GREETING", "out", HUMAN_HANDOFF_MESSAGE)
-            self._cleanup_session(phone)
-            return [OutgoingMessage(text=HUMAN_HANDOFF_MESSAGE)]
-
-        # ----------------------------------------------------------------
-        # Special branch: "pular" keyword at OPTIONAL_NOTE — store empty note
-        # ----------------------------------------------------------------
-        if current == Step.OPTIONAL_NOTE and (text or "").strip().lower() == OPTIONAL_NOTE_SKIP_KEYWORD:
-            answer = ""
-
-        # ----------------------------------------------------------------
-        # Special branch: LGPD consent declined → discard data, end flow
-        # ----------------------------------------------------------------
-        if current == Step.CONSENT and answer == CONSENT_DECLINE_OPTION:
-            log.info("conversation_lgpd_declined", phone=mask_phone(phone))
-            await self._log_conversation(phone, session.whatsapp_name, "CONSENT", "out", LGPD_DECLINED_MESSAGE)
-            self._cleanup_session(phone)
-            return [OutgoingMessage(text=LGPD_DECLINED_MESSAGE)]
 
         # ----------------------------------------------------------------
         # Store the answer in collected_data
@@ -377,7 +416,11 @@ class ConversationEngine:
         if advance_to == Step.CLOSING:
             await self._on_conversation_complete(session)
             messages = await self._build_prompt(Step.CLOSING, session, last_answer=answer)
-            await self._log_conversation(phone, session.whatsapp_name, "CLOSING", "out", messages[0].text if messages else "")
+            await self._log_conversation(
+                phone, session.whatsapp_name, "CLOSING", "out",
+                messages[0].text if messages else "",
+                bot_action="lead_saved_telegram_sent",
+            )
             self._cleanup_session(phone)
             return messages
 
@@ -442,7 +485,8 @@ class ConversationEngine:
         prompt_text = config.prompt
 
         # ── LLM-enhanced prompt (optional, with automatic fallback) ──
-        if settings.llm_enabled and settings.openrouter_api_key:
+        # Skip LLM for steps that use fixed prompts (GREETING, GENDER)
+        if settings.llm_enabled and settings.openrouter_api_key and step not in (Step.GREETING, Step.GENDER):
             user_name = session.whatsapp_name if session else ""
             collected = session.collected_data if session else {}
             generated = await llm_generate(
@@ -468,6 +512,45 @@ class ConversationEngine:
             return [OutgoingMessage(text=prompt_text)]
         return [OutgoingMessage(text=config.full_prompt())]
 
+    async def _handle_greeting_response(self, session: UserSession, text: str) -> None:
+        """Extract name and optionally who_for from the greeting response."""
+        if settings.llm_enabled and settings.openrouter_api_key:
+            info = await llm_extract_greeting(
+                api_key=settings.openrouter_api_key,
+                model=settings.llm_model,
+                user_text=text,
+                timeout=float(settings.llm_timeout_secs),
+            )
+            if info.get("name"):
+                session.whatsapp_name = info["name"]
+                session.collected_data["name"] = info["name"]
+            if info.get("who_for"):
+                session.collected_data["who_for"] = info["who_for"]
+        else:
+            # LLM disabled (tests) — treat entire text as name
+            session.whatsapp_name = text.strip()
+            session.collected_data["name"] = text.strip()
+
+        log.debug(
+            "greeting_response_processed",
+            phone=mask_phone(session.phone),
+            name=session.collected_data.get("name"),
+            who_for=session.collected_data.get("who_for"),
+        )
+
+    @staticmethod
+    def _is_handoff_request(text: str) -> bool:
+        """Detect if the user is requesting to speak to a human."""
+        lower = (text or "").lower()
+        keywords = [
+            "falar com alguém", "falar com alguem",
+            "falar com uma pessoa", "falar com pessoa",
+            "atendente", "atendimento humano",
+            "pessoa real", "humano",
+            "prefiro falar com",
+        ]
+        return any(kw in lower for kw in keywords)
+
     def _cleanup_session(self, phone: str) -> None:
         """Remove the active session for *phone*, if any."""
         self._sessions.pop(phone, None)
@@ -475,12 +558,15 @@ class ConversationEngine:
 
     async def _log_conversation(
         self, phone: str, name: str, step: str, direction: str, content: str,
+        bot_action: str = "",
     ) -> None:
         """Log a conversation message to Google Sheets (fire-and-forget)."""
         if self._sheets_client is None:
             return
         try:
-            await self._sheets_client.log_conversation(phone, name, step, direction, content)
+            await self._sheets_client.log_conversation(
+                phone, name, step, direction, content, bot_action=bot_action,
+            )
         except Exception:
             log.debug("conversation_log_write_failed", phone=mask_phone(phone), step=step)
 
@@ -510,7 +596,7 @@ class ConversationEngine:
                 )
 
     async def _on_conversation_complete(self, session: UserSession) -> None:
-        """Hook called when a contact completes the flow and gives LGPD consent.
+        """Hook called when a contact completes the flow.
 
         Assembles the full :class:`~theraflow.sheets.client.LeadData` record,
         logs it, persists it to Google Sheets, and sends a Telegram notification.
@@ -543,16 +629,9 @@ class ConversationEngine:
         _lead_fields: list[str] = [
             "who_for",
             "gender",
-            "age_group",
-            "city",
-            "format",
             "first_therapy",
             "topic",
             "urgency",
-            "preferred_time",
-            "appointment_interest",
-            "note",
-            "consent",
         ]
         lead = LeadData(
             whatsapp_name=session.whatsapp_name,

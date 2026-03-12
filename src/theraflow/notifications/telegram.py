@@ -120,6 +120,39 @@ class TelegramNotifier:
                 risk_level=risk_level,
             )
 
+    async def send_handoff_alert(self, phone: str, name: str) -> None:
+        """Send an alert when a user requests to speak to a human.
+
+        Args:
+            phone: Sender's phone number.
+            name: WhatsApp display name.
+        """
+        from urllib.parse import quote
+
+        greeting = quote(
+            f"Olá, {name}! Recebi seu contato e estou disponível para conversar."
+        )
+        wa_link = f"https://wa.me/{phone}?text={greeting}"
+        text = (
+            "📞 <b>SOLICITAÇÃO DE ATENDIMENTO HUMANO</b>\n\n"
+            f"<b>Nome:</b> {name}\n"
+            f"<b>Telefone:</b> <a href=\"{wa_link}\">{phone}</a>\n\n"
+            "O contato solicitou falar diretamente com uma pessoa."
+        )
+
+        log.info("telegram_handoff_alert_attempt", phone=mask_phone(phone))
+
+        try:
+            await self._post_message(text)
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "telegram_handoff_alert_error",
+                phone=mask_phone(phone),
+                error=str(exc),
+            )
+        else:
+            log.info("telegram_handoff_alert_ok", phone=mask_phone(phone))
+
     async def send_lead_notification(self, lead: LeadData) -> None:
         """Send a lead summary notification to the configured Telegram chat.
 
@@ -260,8 +293,7 @@ class TelegramNotifier:
             f"<b>Para quem:</b> {lead.who_for}\n"
             f"<b>Gênero:</b> {lead.gender}\n"
             f"<b>Tema:</b> {lead.topic}\n"
-            f"<b>Condições (R$60 + tarde):</b> {lead.terms_agreement}\n"
-            f"<b>Quando quer iniciar:</b> {lead.scheduling}\n\n"
+            f"<b>Quando quer iniciar:</b> {lead.urgency}\n\n"
             f"<b>Prioridade:</b> {urgency_label} ({lead.score} pts)\n"
             f"<b>Qualidade do lead:</b> {lead.lead_quality}\n"
             f"<b>Nível de risco:</b> {lead.risk_level}"
