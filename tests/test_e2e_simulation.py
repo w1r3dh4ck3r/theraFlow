@@ -346,10 +346,34 @@ async def test_scheduling_declined(sim):
 
 @pytest.mark.asyncio
 async def test_score_calculation():
-    """Lead scoring based on scheduling urgency."""
+    """Multi-axis lead quality scoring."""
     from theraflow.sheets.client import calculate_score
 
-    assert calculate_score({"scheduling": "O quanto antes"}) == (5, "Hot")
-    assert calculate_score({"scheduling": "Nesta semana"}) == (5, "Hot")
-    assert calculate_score({"scheduling": "Neste mês"}) == (3, "Warm")
-    assert calculate_score({}) == (0, "Low")
+    # scheduling only: interest (+20) + agreed (+20) + completed (+10) = 50 → warm
+    assert calculate_score({"scheduling": "O quanto antes"}) == (50, "warm")
+    assert calculate_score({"scheduling": "Nesta semana"}) == (50, "warm")
+
+    # scheduling but not committed: interest (+20) + completed (+10) = 30 → warm
+    assert calculate_score({"scheduling": "Neste mês"}) == (30, "warm")
+
+    # no data → cold
+    assert calculate_score({}) == (0, "cold")
+
+    # full hot lead: clear topic (+20) + name+phone (+15) + interest (+20)
+    #               + terms (+15) + agreed (+20) + completed (+10) = 100 → hot
+    hot_data = {
+        "topic": "ansiedade e estresse no trabalho",
+        "whatsapp_name": "Maria",
+        "phone_number": "5511999990000",
+        "scheduling": "O quanto antes",
+        "terms_agreement": "Concordo",
+    }
+    score, quality = calculate_score(hot_data)
+    assert quality == "hot"
+    assert score == 100
+
+    # vague responses penalty applies when >=2 values are <=2 chars
+    vague_data = {"who_for": "eu", "gender": "M", "scheduling": "Neste mês"}
+    score_vague, _ = calculate_score(vague_data)
+    score_clean, _ = calculate_score({"scheduling": "Neste mês"})
+    assert score_vague == score_clean - 10

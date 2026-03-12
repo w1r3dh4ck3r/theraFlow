@@ -523,7 +523,7 @@ class ConversationEngine:
             session: The completed :class:`UserSession` with all collected data.
         """
         data = session.collected_data
-        score, _priority = calculate_score(data)
+        score, _lead_quality = calculate_score(data)
 
         # Build the lead record; use empty-string defaults for any optional
         # fields that might be absent (e.g. note on a skipped step).
