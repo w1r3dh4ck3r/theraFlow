@@ -49,7 +49,7 @@ from theraflow.conversation.flow import (
 from theraflow.config import settings
 from theraflow.llm.service import generate_response as llm_generate
 from theraflow.logging import get_logger
-from theraflow.sheets.client import LeadData, calculate_score
+from theraflow.sheets.client import LeadData, calculate_score, derive_intent
 from theraflow.utils import mask_phone
 
 # ---------------------------------------------------------------------------
@@ -125,6 +125,8 @@ class UserSession(BaseModel):
     last_activity_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC)
     )
+    # Populated by the safety detector when wired in a future phase.
+    risk_level: str = "none"
 
 
 # ---------------------------------------------------------------------------
@@ -523,7 +525,18 @@ class ConversationEngine:
             session: The completed :class:`UserSession` with all collected data.
         """
         data = session.collected_data
-        score, _lead_quality = calculate_score(data)
+        score, lead_quality = calculate_score(data)
+
+        # Risk level is set on the session by the safety detector during
+        # handle_message().  Defaults to 'none' until that phase is wired in.
+        risk_level = session.risk_level
+
+        # Derive intent; pass risk_level via data so derive_intent can detect
+        # crisis signals even when risk_level is not stored in collected_data.
+        intent = derive_intent({**data, "risk_level": risk_level})
+
+        # Simple confidence heuristic: score / 100, capped at 1.0.
+        confidence = min(1.0, score / 100.0)
 
         # Build the lead record; use empty-string defaults for any optional
         # fields that might be absent (e.g. note on a skipped step).
@@ -545,6 +558,10 @@ class ConversationEngine:
             whatsapp_name=session.whatsapp_name,
             phone_number=session.phone,
             score=score,
+            lead_quality=lead_quality,
+            risk_level=risk_level,
+            intent=intent,
+            confidence=confidence,
             **{key: data.get(key, "") for key in _lead_fields},
         )
 
@@ -553,6 +570,10 @@ class ConversationEngine:
             phone=mask_phone(session.phone),
             lead_id=lead.lead_id,
             score=score,
+            lead_quality=lead_quality,
+            intent=intent,
+            risk_level=risk_level,
+            confidence=confidence,
         )
 
         # ----------------------------------------------------------------

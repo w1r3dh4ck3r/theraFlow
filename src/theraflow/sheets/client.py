@@ -62,6 +62,10 @@ COLUMNS: list[str] = [
     "consent",
     "score",
     "status",
+    "lead_quality",
+    "risk_level",
+    "intent",
+    "confidence",
 ]
 
 COLUMN_HEADERS: list[str] = [
@@ -83,6 +87,10 @@ COLUMN_HEADERS: list[str] = [
     "Consentimento LGPD",
     "Pontuação",
     "Status",
+    "Qualidade do Lead",
+    "Nível de Risco",
+    "Intenção",
+    "Confiança",
 ]
 
 FOLLOW_UP_COLUMNS: list[str] = [
@@ -296,8 +304,10 @@ class LeadData(BaseModel):
     consent: str
     score: int
     status: str = "new"
-    lead_quality: str = "low"
+    lead_quality: str = "cold"
     risk_level: str = "none"
+    intent: str = "unclear"
+    confidence: float = 0.0
 
     def to_row(self) -> list[str | int]:
         """Return an ordered list of values matching :data:`COLUMNS`.
