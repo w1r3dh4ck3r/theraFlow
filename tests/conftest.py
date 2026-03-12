@@ -47,6 +47,7 @@ def mock_telegram() -> AsyncMock:
     """Async mock for TelegramNotifier — records calls to send_lead_notification."""
     notifier: AsyncMock = AsyncMock()
     notifier.send_lead_notification = AsyncMock()
+    notifier.send_safety_alert = AsyncMock()
     return notifier
 
 

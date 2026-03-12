@@ -10,10 +10,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 from theraflow.conversation.engine import ConversationEngine, OutgoingMessage
 from theraflow.conversation.flow import LGPD_DECLINED_MESSAGE
+from theraflow.safety.responses import CRISIS_MESSAGE_HIGH, CRISIS_MESSAGE_MEDIUM
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -402,3 +403,117 @@ async def test_scheduling_decline(
 
     # _on_follow_up is not yet called by handle_message — no follow-up write
     mock_sheets.write_follow_up.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Scenario 5 — Crisis: HIGH risk (immediate danger signal)
+# ---------------------------------------------------------------------------
+
+
+async def test_crisis_high_risk(
+    engine: ConversationEngine,
+    mock_sheets: AsyncMock,
+    mock_telegram: AsyncMock,
+) -> None:
+    """Send a HIGH-risk message after greeting; verify crisis response and cleanup.
+
+    A new session is opened via the initial "Oi", then the user sends a
+    HIGH-risk phrase.  The engine must:
+    - Return :data:`~theraflow.safety.responses.CRISIS_MESSAGE_HIGH` which
+      embeds the CVV number *188* and the SAMU number *192*.
+    - Pop the session from ``engine._sessions`` immediately.
+    - Call ``mock_telegram.send_safety_alert`` exactly once with
+      ``risk_level='high'``.
+    - NOT persist any lead data to Sheets.
+    """
+    # Step 1 — Create session
+    await send(engine, PHONE, text="Oi")
+    assert PHONE in engine._sessions, "Session should exist after initial message"
+
+    # Step 2 — HIGH-risk phrase triggers crisis response
+    crisis_msgs = await send(engine, PHONE, text="quero me matar")
+
+    # Response must be non-empty and contain both emergency numbers
+    assert crisis_msgs, "Expected a non-empty response on HIGH-risk message"
+    combined_text = " ".join(msg.text for msg in crisis_msgs)
+    assert "188" in combined_text, f"CVV number 188 not found in: {combined_text!r}"
+    assert "192" in combined_text, f"SAMU number 192 not found in: {combined_text!r}"
+
+    # Entire crisis message should match the canonical constant
+    assert crisis_msgs[0].text == CRISIS_MESSAGE_HIGH
+
+    # Session must be cleaned up — no further messages should be delivered
+    assert PHONE not in engine._sessions, (
+        "Session should be removed from engine._sessions after HIGH-risk detection"
+    )
+
+    # Safety alert must be forwarded to Telegram with correct risk level
+    mock_telegram.send_safety_alert.assert_called_once_with(
+        phone=PHONE,
+        risk_level="high",
+        matched_terms=ANY,
+    )
+
+    # No lead data should be written — conversation was cut short by the crisis
+    mock_sheets.write_lead.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6 — Crisis: MEDIUM risk (distress signal, flow continues)
+# ---------------------------------------------------------------------------
+
+
+async def test_crisis_medium_risk(
+    engine: ConversationEngine,
+    mock_sheets: AsyncMock,
+    mock_telegram: AsyncMock,
+) -> None:
+    """Send a MEDIUM-risk message after greeting; verify warning and session retention.
+
+    Unlike HIGH risk, a MEDIUM-risk detection must NOT clean up the session —
+    the user should be able to continue the flow after receiving the warning.
+
+    Expected behaviour:
+    - Response contains :data:`~theraflow.safety.responses.CRISIS_MESSAGE_MEDIUM`
+      which embeds CVV *188* and an empathetic continuation invitation.
+    - Session is **not** removed from ``engine._sessions``.
+    - ``mock_telegram.send_safety_alert`` called once with ``risk_level='medium'``.
+    - A valid follow-up message from the user is accepted and the engine
+      advances the conversation normally.
+    """
+    # Step 1 — Create session
+    await send(engine, PHONE, text="Oi")
+    assert PHONE in engine._sessions, "Session should exist after initial message"
+
+    # Step 2 — MEDIUM-risk phrase triggers medium crisis response
+    crisis_msgs = await send(engine, PHONE, text="não aguento mais")
+
+    # Response must be non-empty and carry the CVV number
+    assert crisis_msgs, "Expected a non-empty response on MEDIUM-risk message"
+    combined_text = " ".join(msg.text for msg in crisis_msgs)
+    assert "188" in combined_text, f"CVV number 188 not found in: {combined_text!r}"
+
+    # Entire crisis message should match the canonical constant
+    assert crisis_msgs[0].text == CRISIS_MESSAGE_MEDIUM
+
+    # Session must be RETAINED — the user can continue after the warning
+    assert PHONE in engine._sessions, (
+        "Session should be kept in engine._sessions after MEDIUM-risk detection"
+    )
+
+    # Safety alert must be forwarded to Telegram with correct risk level
+    mock_telegram.send_safety_alert.assert_called_once_with(
+        phone=PHONE,
+        risk_level="medium",
+        matched_terms=ANY,
+    )
+
+    # User continues the flow — session is still at Step.GREETING (the
+    # medium-risk handler returns early without advancing the step).
+    follow_up_msgs = await send(engine, PHONE, button_id="opt_0", button_title="Sim")
+    assert follow_up_msgs, "Expected a response after user continues post-warning"
+
+    # Session must still be alive — conversation is in progress
+    assert PHONE in engine._sessions, (
+        "Session should persist while the user continues past the medium-risk warning"
+    )
