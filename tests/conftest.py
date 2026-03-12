@@ -26,6 +26,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from unittest.mock import AsyncMock
 
+import httpx
+
 from theraflow.conversation.engine import ConversationEngine
 from theraflow.whatsapp import router as whatsapp_router
 
@@ -75,6 +77,7 @@ def test_app(engine: ConversationEngine) -> FastAPI:
     app = FastAPI()
     app.include_router(whatsapp_router)
     app.state.engine = engine
+    app.state.http_client = httpx.AsyncClient()
     return app
 
 

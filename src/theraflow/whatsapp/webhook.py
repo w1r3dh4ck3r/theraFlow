@@ -212,6 +212,10 @@ async def receive_webhook(
 
     payload: dict[str, Any] = await request.json()
 
+    if not isinstance(payload, dict):
+        log.warning("webhook_invalid_payload_type", payload_type=type(payload).__name__)
+        return {"status": "ok"}
+
     messages = _extract_messages(payload)
     if not messages:
         log.debug("webhook_no_messages", object_type=payload.get("object"))
