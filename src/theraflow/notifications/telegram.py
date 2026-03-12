@@ -54,6 +54,72 @@ class TelegramNotifier:
     # Public API
     # ------------------------------------------------------------------
 
+    async def send_safety_alert(
+        self,
+        phone: str,
+        risk_level: str,
+        matched_terms: list[str],
+    ) -> None:
+        """Send a crisis-safety alert to the configured Telegram chat.
+
+        Formats a Portuguese-language alert with a priority tag, the masked
+        phone number, and the matched risk terms.  Any network or API error is
+        caught, logged, and silently suppressed so the safety response is still
+        delivered to the user even when Telegram is unavailable.
+
+        Args:
+            phone: Sender's phone number (will be masked before sending).
+            risk_level: ``'high'`` or ``'medium'`` — controls the priority tag.
+            matched_terms: Human-readable list of terms that triggered the alert.
+        """
+        if risk_level == "high":
+            priority_tag = "🚨 URGENTE"
+        else:
+            priority_tag = "⚠️ ATENÇÃO"
+
+        terms_str = ", ".join(matched_terms) if matched_terms else "—"
+        text = (
+            f"<b>{priority_tag} — Alerta de segurança theraFlow</b>\n\n"
+            f"<b>Telefone:</b> {mask_phone(phone)}\n"
+            f"<b>Nível de risco:</b> {risk_level}\n"
+            f"<b>Termos detectados:</b> {terms_str}"
+        )
+
+        log.info(
+            "telegram_safety_alert_attempt",
+            phone=mask_phone(phone),
+            risk_level=risk_level,
+            matched_terms=matched_terms,
+        )
+
+        try:
+            await self._post_message(text)
+        except httpx.HTTPStatusError as exc:
+            log.error(
+                "telegram_safety_alert_http_error",
+                phone=mask_phone(phone),
+                status_code=exc.response.status_code,
+                response_text=exc.response.text,
+            )
+        except httpx.RequestError as exc:
+            log.error(
+                "telegram_safety_alert_request_error",
+                phone=mask_phone(phone),
+                error=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "telegram_safety_alert_unexpected_error",
+                phone=mask_phone(phone),
+                error=str(exc),
+            )
+        else:
+            log.info(
+                "telegram_safety_alert_ok",
+                phone=mask_phone(phone),
+                risk_level=risk_level,
+            )
+
     async def send_lead_notification(self, lead: LeadData) -> None:
         """Send a lead summary notification to the configured Telegram chat.
 
