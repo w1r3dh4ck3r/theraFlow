@@ -107,6 +107,26 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ------------------------------------------------------------------
+    # LLM / OpenRouter
+    # ------------------------------------------------------------------
+    openrouter_api_key: str = Field(
+        default="",
+        description="OpenRouter API key for LLM summarization",
+    )
+    llm_model: str = Field(
+        default="google/gemini-2.0-flash-001",
+        description="LLM model identifier",
+    )
+    llm_timeout_secs: int = Field(
+        default=10,
+        description="LLM API call timeout in seconds",
+    )
+    llm_enabled: bool = Field(
+        default=False,
+        description="Enable LLM-powered responses",
+    )
+
 
 #: Module-level singleton — import this everywhere settings are needed.
 settings = Settings()
