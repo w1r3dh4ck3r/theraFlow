@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from theraflow.safety.detector import detect_risk
+from theraflow.safety.responses import CRISIS_MESSAGE_HIGH, CRISIS_MESSAGE_MEDIUM
 from theraflow.conversation.flow import (
     CONSENT_DECLINE_OPTION,
     HUMAN_HANDOFF_MESSAGE,
@@ -202,6 +204,46 @@ class ConversationEngine:
 
         # Determine inbound content for logging
         inbound_text = button_title or text or ""
+
+        # ----------------------------------------------------------------
+        # Safety check — runs for ALL messages, before any session logic
+        # ----------------------------------------------------------------
+        masked = mask_phone(phone)
+        risk = detect_risk(inbound_text)
+        if risk.risk_level == "high":
+            log.warning(
+                "high_risk_detected",
+                phone=masked,
+                matched_terms=risk.matched_terms,
+            )
+            if self._telegram_notifier is not None:
+                try:
+                    await self._telegram_notifier.send_safety_alert(
+                        phone=phone,
+                        risk_level="high",
+                        matched_terms=risk.matched_terms,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("safety_alert_send_failed", phone=masked)
+            self._sessions.pop(phone, None)
+            return [OutgoingMessage(text=CRISIS_MESSAGE_HIGH)]
+        elif risk.risk_level == "medium":
+            log.warning(
+                "medium_risk_detected",
+                phone=masked,
+                matched_terms=risk.matched_terms,
+            )
+            if self._telegram_notifier is not None:
+                try:
+                    await self._telegram_notifier.send_safety_alert(
+                        phone=phone,
+                        risk_level="medium",
+                        matched_terms=risk.matched_terms,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("safety_alert_send_failed", phone=masked)
+            # Do NOT clean up session — let them continue after the warning
+            return [OutgoingMessage(text=CRISIS_MESSAGE_MEDIUM)]
 
         session = self._sessions.get(phone)
 
