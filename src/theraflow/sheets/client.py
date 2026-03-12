@@ -50,9 +50,16 @@ COLUMNS: list[str] = [
     "phone_number",
     "who_for",
     "gender",
+    "age_group",
+    "city",
+    "format",
+    "first_therapy",
     "topic",
-    "terms_agreement",
-    "scheduling",
+    "urgency",
+    "preferred_time",
+    "appointment_interest",
+    "note",
+    "consent",
     "score",
     "status",
 ]
@@ -64,9 +71,16 @@ COLUMN_HEADERS: list[str] = [
     "Telefone",
     "Para quem",
     "Gênero",
+    "Faixa etária",
+    "Cidade",
+    "Formato",
+    "Primeira terapia",
     "Tema",
-    "Condições (R$60 + tarde)",
-    "Quando quer iniciar",
+    "Urgência",
+    "Horário preferido",
+    "Interesse em agendar",
+    "Observação",
+    "Consentimento LGPD",
     "Pontuação",
     "Status",
 ]
@@ -143,11 +157,17 @@ def calculate_score(data: dict[str, Any]) -> tuple[int, str]:
     """
     score = 0
 
-    scheduling = data.get("scheduling", "")
-    if scheduling in ("O quanto antes", "Nesta semana"):
-        score += 5
-    elif scheduling == "Neste mês":
+    if data.get("appointment_interest") == "Sim":
         score += 3
+
+    urgency = data.get("urgency", "")
+    if urgency == "O quanto antes":
+        score += 2
+    elif urgency == "Nesta semana":
+        score += 1
+
+    if data.get("note"):
+        score += 1
 
     if score >= 5:
         priority = "Hot"
@@ -196,9 +216,16 @@ class LeadData(BaseModel):
     phone_number: str
     who_for: str
     gender: str
+    age_group: str
+    city: str
+    format: str
+    first_therapy: str
     topic: str
-    terms_agreement: str
-    scheduling: str
+    urgency: str
+    preferred_time: str
+    appointment_interest: str
+    note: str
+    consent: str
     score: int
     status: str = "new"
 

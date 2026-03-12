@@ -33,11 +33,12 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from theraflow.conversation.flow import (
-    DECLINE_OPTION,
+    CONSENT_DECLINE_OPTION,
+    HUMAN_HANDOFF_MESSAGE,
+    HUMAN_HANDOFF_OPTION,
     INVALID_INPUT_MESSAGE,
-    SCHEDULING_DECLINE_OPTION,
-    SCHEDULING_DECLINED_MESSAGE,
-    TERMS_DECLINED_MESSAGE,
+    LGPD_DECLINED_MESSAGE,
+    OPTIONAL_NOTE_SKIP_KEYWORD,
     STEP_CONFIGS,
     Step,
     StepConfig,
@@ -82,6 +83,11 @@ class OutgoingMessage:
     def is_list(self) -> bool:
         return bool(self.list_rows)
 
+    @property
+    def is_interactive(self) -> bool:
+        """True when the message carries interactive UI elements (buttons or list)."""
+        return bool(self.buttons or self.list_rows)
+
 
 # ---------------------------------------------------------------------------
 # Session model
@@ -99,7 +105,10 @@ class UserSession(BaseModel):
             Advances with each valid response.
         collected_data: Answers gathered so far, keyed by
             :attr:`~theraflow.conversation.flow.StepConfig.data_key`.
-        created_at: UTC timestamp of session creation.
+        created_at: UTC timestamp of session creation (immutable; for audit).
+        last_activity_at: UTC timestamp of the most recent inbound message.
+            Refreshed on every call to :meth:`ConversationEngine.handle_message`
+            and used by the TTL eviction logic.
     """
 
     phone: str
@@ -107,6 +116,9 @@ class UserSession(BaseModel):
     current_step: Step
     collected_data: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC)
+    )
+    last_activity_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC)
     )
 
@@ -193,6 +205,11 @@ class ConversationEngine:
 
         session = self._sessions.get(phone)
 
+        # Refresh activity timestamp for every inbound message so TTL eviction
+        # is based on idleness rather than session age.
+        if session is not None:
+            session.last_activity_at = datetime.now(UTC)
+
         # ----------------------------------------------------------------
         # New contact — create session and return the greeting prompt
         # ----------------------------------------------------------------
@@ -253,24 +270,28 @@ class ConversationEngine:
             return replies
 
         # ----------------------------------------------------------------
-        # Special branch: decline terms (price + afternoon) → end flow
+        # Special branch: human handoff at GREETING
         # ----------------------------------------------------------------
-        if current == Step.TERMS and answer == DECLINE_OPTION:
-            log.info("conversation_terms_declined", phone=mask_phone(phone))
-            await self._log_conversation(phone, session.whatsapp_name, "TERMS", "out", TERMS_DECLINED_MESSAGE)
+        if current == Step.GREETING and answer == HUMAN_HANDOFF_OPTION:
+            log.info("conversation_human_handoff", phone=mask_phone(phone))
+            await self._log_conversation(phone, session.whatsapp_name, "GREETING", "out", HUMAN_HANDOFF_MESSAGE)
             self._cleanup_session(phone)
-            return [OutgoingMessage(text=TERMS_DECLINED_MESSAGE)]
+            return [OutgoingMessage(text=HUMAN_HANDOFF_MESSAGE)]
 
         # ----------------------------------------------------------------
-        # Special branch: decline scheduling → Follow Up sheet, end flow
+        # Special branch: "pular" keyword at OPTIONAL_NOTE — store empty note
         # ----------------------------------------------------------------
-        if current == Step.SCHEDULING and answer == SCHEDULING_DECLINE_OPTION:
-            log.info("conversation_scheduling_declined", phone=mask_phone(phone))
-            session.collected_data["scheduling"] = SCHEDULING_DECLINE_OPTION
-            await self._on_follow_up(session)
-            await self._log_conversation(phone, session.whatsapp_name, "SCHEDULING", "out", SCHEDULING_DECLINED_MESSAGE)
+        if current == Step.OPTIONAL_NOTE and (text or "").strip().lower() == OPTIONAL_NOTE_SKIP_KEYWORD:
+            answer = ""
+
+        # ----------------------------------------------------------------
+        # Special branch: LGPD consent declined → discard data, end flow
+        # ----------------------------------------------------------------
+        if current == Step.CONSENT and answer == CONSENT_DECLINE_OPTION:
+            log.info("conversation_lgpd_declined", phone=mask_phone(phone))
+            await self._log_conversation(phone, session.whatsapp_name, "CONSENT", "out", LGPD_DECLINED_MESSAGE)
             self._cleanup_session(phone)
-            return [OutgoingMessage(text=SCHEDULING_DECLINED_MESSAGE)]
+            return [OutgoingMessage(text=LGPD_DECLINED_MESSAGE)]
 
         # ----------------------------------------------------------------
         # Store the answer in collected_data
@@ -328,16 +349,17 @@ class ConversationEngine:
         are cleaned up lazily rather than via a background timer.
 
         Eviction order:
-        1. Remove every session whose ``created_at`` is older than
-           :data:`SESSION_TTL_SECONDS` seconds ago.
+        1. Remove every session whose ``last_activity_at`` is older than
+           :data:`SESSION_TTL_SECONDS` seconds ago (idle TTL, not session age).
         2. If the store still holds >= :data:`MAX_SESSIONS` entries, drop the
-           single oldest session (LRU by ``created_at``) to make room.
+           single least-recently-active session (LRU by ``last_activity_at``)
+           to make room.
         """
         cutoff = datetime.now(UTC).timestamp() - SESSION_TTL_SECONDS
         stale_keys = [
             phone
             for phone, session in self._sessions.items()
-            if session.created_at.timestamp() < cutoff
+            if session.last_activity_at.timestamp() < cutoff
         ]
         for phone in stale_keys:
             self._sessions.pop(phone, None)
@@ -345,7 +367,7 @@ class ConversationEngine:
 
         if len(self._sessions) >= MAX_SESSIONS:
             oldest_phone = min(
-                self._sessions, key=lambda p: self._sessions[p].created_at
+                self._sessions, key=lambda p: self._sessions[p].last_activity_at
             )
             self._sessions.pop(oldest_phone)
             log.info("conversation_session_lru_evicted", phone=oldest_phone)
@@ -439,9 +461,16 @@ class ConversationEngine:
         _lead_fields: list[str] = [
             "who_for",
             "gender",
+            "age_group",
+            "city",
+            "format",
+            "first_therapy",
             "topic",
-            "terms_agreement",
-            "scheduling",
+            "urgency",
+            "preferred_time",
+            "appointment_interest",
+            "note",
+            "consent",
         ]
         lead = LeadData(
             whatsapp_name=session.whatsapp_name,
