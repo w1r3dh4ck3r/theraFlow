@@ -72,6 +72,10 @@ STEP_INSTRUCTIONS: dict[str, str] = {
     "FIRST_THERAPY": "Vá direto à pergunta: esta seria a primeira experiência com terapia?",
     "TOPIC": "Vá direto à pergunta: qual tema gostaria de trabalhar na terapia?",
     "URGENCY": "Vá direto à pergunta: quando gostaria de começar a terapia?",
+    "TERMS": (
+        "Informe o valor social de R$ 60,00 por sessão no turno da tarde "
+        "e pergunte se está de acordo com essas condições."
+    ),
     "CLOSING": "Agradeça, informe que entrarão em contato em breve para confirmar o agendamento.",
 }
 
@@ -170,6 +174,7 @@ STEP_CLASSIFY_HINTS: dict[str, str] = {
     "FIRST_THERAPY": "Se é a primeira vez fazendo terapia (sim ou não).",
     "TOPIC": "O tema principal que a pessoa quer trabalhar na terapia.",
     "URGENCY": "Quando quer começar a terapia (urgente, esta semana, este mês, ainda pensando).",
+    "TERMS": "Se concorda com o valor de R$ 60 por sessão no turno da tarde (sim ou não).",
 }
 
 

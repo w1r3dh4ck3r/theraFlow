@@ -16,7 +16,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from theraflow.conversation.engine import ConversationEngine, OutgoingMessage
-from theraflow.conversation.flow import HUMAN_HANDOFF_MESSAGE, Step
+from theraflow.conversation.flow import HUMAN_HANDOFF_MESSAGE, TERMS_DECLINED_MESSAGE, Step
 from theraflow.safety.responses import CRISIS_MESSAGE_HIGH, CRISIS_MESSAGE_MEDIUM
 from theraflow.sheets.client import calculate_score
 
@@ -68,7 +68,8 @@ class TestHotLeadScenario:
         await send(engine, button_id="opt_0", button_title="Mulher")        # GENDER → FIRST_THERAPY
         await send(engine, text="Não")                                      # FIRST_THERAPY → TOPIC
         await send(engine, text="Ansiedade")                                # TOPIC → URGENCY
-        msgs = await send(engine, text="O quanto antes")                    # URGENCY → CLOSING
+        await send(engine, text="O quanto antes")                          # URGENCY → TERMS
+        msgs = await send(engine, text="Sim")                              # TERMS → CLOSING
 
         assert "Perfeito" in msgs[0].text
         assert PHONE not in engine._sessions
@@ -109,7 +110,8 @@ class TestColdLeadScenario:
         await send(engine, button_id="opt_2", button_title="Prefiro não responder")
         await send(engine, text="Sim")                                      # FIRST_THERAPY → TOPIC
         await send(engine, text="Outro")                                    # TOPIC → URGENCY
-        msgs = await send(engine, text="Ainda estou pensando")              # URGENCY → CLOSING
+        await send(engine, text="Ainda estou pensando")                    # URGENCY → TERMS
+        msgs = await send(engine, text="Sim")                              # TERMS → CLOSING
 
         assert "Perfeito" in msgs[0].text
 
@@ -183,12 +185,51 @@ class TestPriceFirstScenario:
         await send(engine, button_id="opt_1", button_title="Homem")         # GENDER → FIRST_THERAPY
         await send(engine, text="Sim")                                      # FIRST_THERAPY → TOPIC
         await send(engine, text="Relacionamentos")                          # TOPIC → URGENCY
-        msgs = await send(engine, text="Nesta semana")                      # URGENCY → CLOSING
+        await send(engine, text="Nesta semana")                            # URGENCY → TERMS
+        msgs = await send(engine, text="Sim")                              # TERMS → CLOSING
 
         assert "Perfeito" in msgs[0].text
         lead = mock_sheets.write_lead.call_args[0][0]
         assert lead.topic == "Relacionamentos"
         assert lead.urgency == "Nesta semana"
+
+
+# ---------------------------------------------------------------------------
+# Scenario: Terms declined — user doesn't accept R$60 / afternoon
+# ---------------------------------------------------------------------------
+
+
+class TestTermsDeclined:
+    async def test_terms_declined_ends_flow(
+        self, engine: ConversationEngine, mock_sheets: AsyncMock
+    ) -> None:
+        """Declining terms ends the flow with a polite message."""
+        await send(engine, text="oi")
+        await send(engine, text="Ana")
+        await send(engine, text="Para mim")
+        await send(engine, button_id="opt_0", button_title="Mulher")
+        await send(engine, text="Não")
+        await send(engine, text="Ansiedade")
+        await send(engine, text="O quanto antes")                          # → TERMS
+        msgs = await send(engine, text="Não")                              # decline
+
+        assert msgs[0].text == TERMS_DECLINED_MESSAGE
+        assert PHONE not in engine._sessions
+        mock_sheets.write_lead.assert_not_called()
+
+    async def test_terms_declined_sends_no_telegram(
+        self, engine: ConversationEngine, mock_telegram: AsyncMock
+    ) -> None:
+        """No lead notification when terms are declined."""
+        await send(engine, text="oi")
+        await send(engine, text="Ana")
+        await send(engine, text="Para mim")
+        await send(engine, button_id="opt_0", button_title="Mulher")
+        await send(engine, text="Sim")
+        await send(engine, text="Ansiedade")
+        await send(engine, text="Nesta semana")
+        await send(engine, text="não concordo")                            # decline
+        mock_telegram.send_lead_notification.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +348,7 @@ class TestRecontact:
         await send(engine, text="Não")
         await send(engine, text="Ansiedade")
         await send(engine, text="O quanto antes")
+        await send(engine, text="Sim")                                      # TERMS → CLOSING
         assert PHONE not in engine._sessions
 
         # New message starts fresh

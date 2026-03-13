@@ -51,7 +51,8 @@ async def run_full_flow(engine: ConversationEngine, phone: str = PHONE_A) -> lis
     await send(engine, phone, button_id="opt_0", button_title="Mulher")              # GENDER → FIRST_THERAPY
     await send(engine, phone, text="Não")                                           # FIRST_THERAPY → TOPIC
     await send(engine, phone, text="Ansiedade")                                     # TOPIC → URGENCY
-    return await send(engine, phone, text="O quanto antes")                         # URGENCY → CLOSING
+    await send(engine, phone, text="O quanto antes")                               # URGENCY → TERMS
+    return await send(engine, phone, text="Sim")                                   # TERMS → CLOSING
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ from theraflow.safety.responses import CRISIS_MESSAGE_HIGH, CRISIS_MESSAGE_MEDIU
 from theraflow.conversation.flow import (
     HUMAN_HANDOFF_MESSAGE,
     INVALID_INPUT_MESSAGE,
+    TERMS_DECLINED_MESSAGE,
     STEP_CONFIGS,
     Step,
     StepConfig,
@@ -393,6 +394,18 @@ class ConversationEngine:
             )
 
         # ----------------------------------------------------------------
+        # Special branch: TERMS declined — end flow gracefully
+        # ----------------------------------------------------------------
+        if current == Step.TERMS and answer and answer.lower().startswith("n"):
+            log.info("conversation_terms_declined", phone=mask_phone(phone))
+            await self._log_conversation(
+                phone, session.whatsapp_name, "TERMS", "out",
+                TERMS_DECLINED_MESSAGE, bot_action="terms_declined",
+            )
+            self._cleanup_session(phone)
+            return [OutgoingMessage(text=TERMS_DECLINED_MESSAGE)]
+
+        # ----------------------------------------------------------------
         # Advance to the next step
         # ----------------------------------------------------------------
         advance_to: Step | None = next_step(current)
@@ -632,6 +645,7 @@ class ConversationEngine:
             "first_therapy",
             "topic",
             "urgency",
+            "terms_agreement",
         ]
         lead = LeadData(
             whatsapp_name=session.whatsapp_name,

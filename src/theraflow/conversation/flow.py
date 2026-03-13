@@ -30,6 +30,7 @@ class Step(StrEnum):
     FIRST_THERAPY = "FIRST_THERAPY"
     TOPIC = "TOPIC"
     URGENCY = "URGENCY"
+    TERMS = "TERMS"
     CLOSING = "CLOSING"
     # Terminal / special-case states (not part of the main STEP_ORDER list)
     HUMAN_HANDOFF = "HUMAN_HANDOFF"
@@ -280,6 +281,16 @@ STEP_CONFIGS: dict[Step, StepConfig] = {
         natural=True,
         data_key="urgency",
     ),
+    Step.TERMS: StepConfig(
+        prompt=(
+            "Nosso atendimento social tem o valor de R$ 60,00 por sessão, "
+            "com horários disponíveis no turno da tarde.\n\n"
+            "Tudo certo com essas condições?"
+        ),
+        options=["Sim", "Não"],
+        natural=True,
+        data_key="terms_agreement",
+    ),
     Step.CLOSING: StepConfig(
         prompt=(
             "Perfeito! Registramos suas informações.\n\n"
@@ -304,6 +315,7 @@ STEP_ORDER: list[Step] = [
     Step.FIRST_THERAPY,
     Step.TOPIC,
     Step.URGENCY,
+    Step.TERMS,
     Step.CLOSING,
 ]
 

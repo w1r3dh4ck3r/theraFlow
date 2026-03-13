@@ -95,7 +95,8 @@ HAPPY_PATH_STEPS = [
     ("button", "opt_0", "Mulher"),                       # GENDER (buttons) → FIRST_THERAPY
     ("text", "Sim"),                                     # FIRST_THERAPY → TOPIC
     ("text", "Ansiedade"),                               # TOPIC → URGENCY
-    ("text", "O quanto antes"),                          # URGENCY → CLOSING
+    ("text", "O quanto antes"),                          # URGENCY → TERMS
+    ("text", "Sim"),                                     # TERMS → CLOSING
 ]
 
 
@@ -233,7 +234,7 @@ async def test_full_happy_path(sim):
     whatsapp_calls = [c for c in outbound if "graph.facebook.com" in c["url"]]
     telegram_calls = [c for c in outbound if "telegram" in c["url"]]
 
-    assert len(whatsapp_calls) >= 6, f"Expected >=6 WhatsApp calls, got {len(whatsapp_calls)}"
+    assert len(whatsapp_calls) >= 7, f"Expected >=7 WhatsApp calls, got {len(whatsapp_calls)}"
     assert len(telegram_calls) == 1, f"Expected 1 Telegram call, got {len(telegram_calls)}"
 
     tg_payload = telegram_calls[0].get("json", {})
@@ -335,16 +336,17 @@ async def test_score_calculation():
     assert calculate_score({}) == (0, "cold")
 
     # full hot lead: clear topic (+20) + name+phone (+15) + interest (+20)
-    #               + agreed (+20) = 75 → hot
+    #               + agreed (+20) + terms (+15) = 90 → hot
     hot_data = {
         "topic": "ansiedade e estresse no trabalho",
         "whatsapp_name": "Maria",
         "phone_number": "5511999990000",
         "urgency": "O quanto antes",
+        "terms_agreement": "Sim",
     }
     score, quality = calculate_score(hot_data)
     assert quality == "hot"
-    assert score == 75
+    assert score == 90
 
     # vague responses penalty applies when >=2 values are <=2 chars
     vague_data = {"who_for": "eu", "gender": "M", "urgency": "Neste mês"}

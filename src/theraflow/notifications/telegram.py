@@ -293,6 +293,7 @@ class TelegramNotifier:
             f"<b>Para quem:</b> {lead.who_for}\n"
             f"<b>Gênero:</b> {lead.gender}\n"
             f"<b>Tema:</b> {lead.topic}\n"
+            f"<b>Condições (R$60 + tarde):</b> {lead.terms_agreement}\n"
             f"<b>Quando quer iniciar:</b> {lead.urgency}\n\n"
             f"<b>Prioridade:</b> {urgency_label} ({lead.score} pts)\n"
             f"<b>Qualidade do lead:</b> {lead.lead_quality}\n"

@@ -53,6 +53,7 @@ COLUMNS: list[str] = [
     "first_therapy",
     "topic",
     "urgency",
+    "terms_agreement",
     "score",
     "status",
     "lead_quality",
@@ -71,6 +72,7 @@ COLUMN_HEADERS: list[str] = [
     "Primeira terapia",
     "Tema",
     "Urgência",
+    "Condições (R$60 + tarde)",
     "Pontuação",
     "Status",
     "Qualidade do Lead",
@@ -184,6 +186,11 @@ def calculate_score(data: dict[str, Any]) -> tuple[int, str]:
     if urgency in ("O quanto antes", "Nesta semana"):
         score += 20
 
+    # +15: accepted terms (R$60 + afternoon)
+    terms: str = data.get("terms_agreement", "") or ""
+    if terms.lower().startswith("s"):
+        score += 15
+
     # -10: vague / single-word answers across multiple fields
     vague_count = sum(
         1
@@ -267,6 +274,7 @@ class LeadData(BaseModel):
     first_therapy: str
     topic: str
     urgency: str
+    terms_agreement: str
     score: int
     status: str = "new"
     lead_quality: str = "cold"
