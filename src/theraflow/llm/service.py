@@ -172,8 +172,32 @@ STEP_CLASSIFY_HINTS: dict[str, str] = {
     "WHO_FOR": "Para quem é o atendimento (para si, filho, familiar, outra pessoa).",
     "GENDER": "Como a pessoa se identifica (mulher, homem, prefiro não informar).",
     "FIRST_THERAPY": "Se é a primeira vez fazendo terapia (sim ou não).",
-    "TOPIC": "O tema principal que a pessoa quer trabalhar na terapia.",
-    "URGENCY": "Quando quer começar a terapia (urgente, esta semana, este mês, ainda pensando).",
+    "TOPIC": (
+        "O tema principal que a pessoa quer trabalhar na terapia.\n"
+        "A pessoa pode usar termos clínicos ou coloquiais — mapeie assim:\n"
+        "- Ansiedade: pânico, síndrome do pânico, crise de ansiedade, nervosismo, "
+        "medo, fobia, TOC, transtorno obsessivo, preocupação excessiva, burnout, "
+        "estresse, insônia, angústia\n"
+        "- Autoestima: insegurança, autoimagem, autoconfiança, vergonha, "
+        "timidez, comparação, síndrome do impostor\n"
+        "- Relacionamentos: término, separação, divórcio, traição, ciúmes, "
+        "dependência emocional, solidão, conflitos no relacionamento\n"
+        "- Luto: perda, falecimento, morte, saudade de alguém que partiu\n"
+        "- Família: conflito familiar, pais, filhos, irmãos, violência doméstica\n"
+        "- Outro: depressão, TDAH, transtorno alimentar, bipolaridade, "
+        "vícios, compulsão, sexualidade, identidade de gênero, trauma, abuso, "
+        "ou qualquer tema não listado acima"
+    ),
+    "URGENCY": (
+        "Quando quer começar a terapia.\n"
+        "Mapeie assim:\n"
+        "- O quanto antes: urgente, já, agora, o mais rápido possível, preciso muito\n"
+        "- Nesta semana: essa semana, nos próximos dias, amanhã\n"
+        "- Neste mês: em breve, logo, daqui a pouco, nas próximas semanas, "
+        "daqui a algumas semanas, quando puder, quando tiver vaga, mês que vem\n"
+        "- Ainda estou pensando: não sei, talvez, vou pensar, estou em dúvida, "
+        "só quero informação, depois eu decido"
+    ),
     "TERMS": "Se concorda com o valor de R$ 60 por sessão no turno da tarde (sim ou não).",
 }
 
