@@ -8,12 +8,21 @@ Telegram notification, session cleanup) for distinct lead archetypes.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
-
 from unittest.mock import ANY, AsyncMock
 
-from theraflow.conversation.engine import ConversationEngine, OutgoingMessage
-from theraflow.conversation.flow import LGPD_DECLINED_MESSAGE
+from theraflow.conversation.engine import (
+    SESSION_TTL_SECONDS,
+    ConversationEngine,
+    OutgoingMessage,
+    UserSession,
+)
+from theraflow.conversation.flow import (
+    INVALID_INPUT_MESSAGE,
+    LGPD_DECLINED_MESSAGE,
+    Step,
+)
 from theraflow.safety.responses import CRISIS_MESSAGE_HIGH, CRISIS_MESSAGE_MEDIUM
 
 # ---------------------------------------------------------------------------
@@ -517,3 +526,262 @@ async def test_crisis_medium_risk(
     assert PHONE in engine._sessions, (
         "Session should persist while the user continues past the medium-risk warning"
     )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7 — Spam / gibberish at a button step
+# ---------------------------------------------------------------------------
+
+
+async def test_spam_gibberish(
+    engine: ConversationEngine,
+    mock_sheets: AsyncMock,
+    mock_telegram: AsyncMock,
+) -> None:
+    """Send random characters at a button step (GENDER); verify reprompt behaviour.
+
+    GENDER uses WhatsApp interactive buttons (3 options), so free-form text is
+    invalid.  The engine must:
+    - Return a 2-message reprompt: the ``INVALID_INPUT_MESSAGE`` error followed
+      by the original GENDER prompt (with its buttons).
+    - Leave ``current_step`` at ``Step.GENDER`` — the step must not advance.
+    - Keep the session alive in ``engine._sessions``.
+    - NOT call any Sheets or Telegram side-effects.
+    """
+    # Drive to GENDER (three exchanges: initial → GREETING answer → WHO_FOR answer)
+    await send(engine, PHONE, text="Oi")                               # → GREETING prompt
+    await send(engine, PHONE, button_id="opt_0", button_title="Sim")  # → WHO_FOR prompt
+    await send(engine, PHONE, text="1")                                # → GENDER prompt
+
+    assert engine._sessions[PHONE].current_step == Step.GENDER
+
+    # Send random characters — no button_payload and text doesn't match any option
+    reprompt_msgs = await send(engine, PHONE, text="asdfghjkl")
+
+    # Must return at least 2 messages: the error notice + the re-issued step prompt
+    assert len(reprompt_msgs) >= 2, (
+        f"Expected reprompt of ≥ 2 messages, got {len(reprompt_msgs)}: {reprompt_msgs!r}"
+    )
+    assert reprompt_msgs[0].text == INVALID_INPUT_MESSAGE, (
+        f"First reprompt message should be INVALID_INPUT_MESSAGE, got: {reprompt_msgs[0].text!r}"
+    )
+
+    # Step must NOT have advanced — session is still waiting for a valid GENDER answer
+    assert engine._sessions[PHONE].current_step == Step.GENDER, (
+        "Step should remain at GENDER after invalid input"
+    )
+
+    # Session must still exist — invalid input does not close the session
+    assert PHONE in engine._sessions
+
+    # No side-effects from a rejected message
+    mock_sheets.write_lead.assert_not_called()
+    mock_telegram.send_lead_notification.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Scenario 8 — Session TTL eviction (no sleep, no freezegun)
+# ---------------------------------------------------------------------------
+
+
+async def test_session_ttl_eviction(
+    engine: ConversationEngine,
+    mock_sheets: AsyncMock,
+    mock_telegram: AsyncMock,
+) -> None:
+    """Age a session beyond SESSION_TTL_SECONDS and verify lazy eviction.
+
+    Eviction is triggered lazily when a *new* contact sends their first message
+    (``_evict_stale_sessions`` is called before each new session is created).
+    ``last_activity_at`` is mutated directly — no ``time.sleep`` or
+    ``freezegun`` are used.
+
+    Expected behaviour:
+    1. After mutation, the stale session is evicted when a different phone
+       causes ``_evict_stale_sessions`` to run.
+    2. The original phone subsequently receives a fresh greeting (a brand-new
+       session at ``Step.GREETING``), confirming the old session is gone.
+    """
+    OTHER_PHONE = "5599999999999"
+
+    # Create a session for PHONE
+    await send(engine, PHONE, text="Oi")
+    assert PHONE in engine._sessions, "Session should exist after initial message"
+
+    # Age the session well past the TTL by mutating last_activity_at directly
+    stale_time = datetime.now(timezone.utc) - timedelta(seconds=SESSION_TTL_SECONDS + 1)
+    engine._sessions[PHONE].last_activity_at = stale_time
+
+    # A different phone's first message triggers _evict_stale_sessions()
+    await send(engine, OTHER_PHONE, text="Oi")
+
+    # The stale session must now be evicted
+    assert PHONE not in engine._sessions, (
+        "Original phone's session should be evicted after TTL expires"
+    )
+
+    # Sending from the original phone again must start a completely fresh session
+    fresh_msgs = await send(engine, PHONE, text="Oi")
+    assert fresh_msgs, "Expected a greeting response for the re-connecting phone"
+    assert PHONE in engine._sessions, (
+        "A new session should be created when the original phone reconnects"
+    )
+    assert engine._sessions[PHONE].current_step == Step.GREETING, (
+        "Fresh session must start at Step.GREETING"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 9 — Post-terminal message (session at CLOSING is silently ignored)
+# ---------------------------------------------------------------------------
+
+
+async def test_post_terminal_message(
+    engine: ConversationEngine,
+    mock_sheets: AsyncMock,
+    mock_telegram: AsyncMock,
+) -> None:
+    """Verify that messages sent to a CLOSING session are silently ignored.
+
+    The engine cleans up the session as soon as it reaches CLOSING during the
+    normal happy path.  This test exercises the post-terminal guard in
+    ``handle_message`` by manually inserting a ghost session at
+    ``Step.CLOSING`` into ``engine._sessions`` after the real flow has already
+    cleaned up, then confirms the guard returns ``[]`` without triggering any
+    further side-effects.
+
+    Two-phase assertions:
+    1. After the full happy path, session is gone and one lead + notification
+       were persisted.
+    2. After injecting a ghost CLOSING session and sending a message, the
+       engine returns ``[]`` and call counts remain unchanged.
+    """
+    # --- Phase 1: complete happy path ---
+    await send(engine, PHONE, text="Oi")
+    await send(engine, PHONE, button_id="opt_0", button_title="Sim")   # GREETING
+    await send(engine, PHONE, text="1")                                 # WHO_FOR
+    await send(engine, PHONE, button_id="opt_0", button_title="Mulher")  # GENDER
+    await send(engine, PHONE, text="4")                                 # AGE_GROUP
+    await send(engine, PHONE, text="São Paulo")                         # CITY
+    await send(engine, PHONE, button_id="opt_0", button_title="Online") # FORMAT
+    await send(engine, PHONE, button_id="opt_0", button_title="Sim")   # FIRST_THERAPY
+    await send(engine, PHONE, text="1")                                 # TOPIC
+    await send(engine, PHONE, text="1")                                 # URGENCY
+    await send(engine, PHONE, text="1")                                 # PREFERRED_TIME
+    await send(engine, PHONE, button_id="opt_0", button_title="Sim")   # APPOINTMENT_INTENT
+    await send(engine, PHONE, text="pular")                             # OPTIONAL_NOTE
+    closing_msgs = await send(engine, PHONE, button_id="opt_0", button_title="Sim")  # CONSENT → CLOSING
+
+    assert closing_msgs, "Expected closing messages from the terminal step"
+    assert "Perfeito" in closing_msgs[0].text
+
+    # Session is already cleaned up after CLOSING
+    assert PHONE not in engine._sessions, (
+        "Session should be removed from engine._sessions after CLOSING"
+    )
+
+    # Side-effects happened exactly once during the real flow
+    mock_sheets.write_lead.assert_called_once()
+    mock_telegram.send_lead_notification.assert_called_once()
+
+    # --- Phase 2: inject ghost session and test post-terminal guard ---
+    ghost = UserSession(
+        phone=PHONE,
+        whatsapp_name=NAME,
+        current_step=Step.CLOSING,
+        collected_data={},
+    )
+    engine._sessions[PHONE] = ghost
+
+    # Any message to a CLOSING session must be silently ignored
+    post_msgs = await send(engine, PHONE, text="Oi")
+    assert post_msgs == [], (
+        f"Expected [] for post-terminal message, got: {post_msgs!r}"
+    )
+
+    # Guard must not trigger any additional Sheets writes or Telegram alerts
+    assert mock_sheets.write_lead.call_count == 1, (
+        "write_lead should not be called again after post-terminal message"
+    )
+    assert mock_telegram.send_lead_notification.call_count == 1, (
+        "send_lead_notification should not be called again after post-terminal message"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 10 — Button payload vs plain text at the same step
+# ---------------------------------------------------------------------------
+
+
+async def test_button_vs_text_input(
+    engine: ConversationEngine,
+    mock_sheets: AsyncMock,
+    mock_telegram: AsyncMock,
+) -> None:
+    """Button payload and equivalent plain-text inputs resolve to the same answer.
+
+    GENDER is a *button* step (3 options ≤ 3, rendered as WhatsApp interactive
+    buttons).  Both input modes are driven in separate sessions:
+
+    - Path A (``PHONE``): button payload ``{'id': 'opt_0', 'title': 'Mulher'}``
+    - Path B (``PHONE_B``): plain text ``'Mulher'``
+
+    Both must store ``'Mulher'`` in ``collected_data['gender']`` and advance
+    to ``Step.AGE_GROUP``.
+
+    AGE_GROUP is a *list* step (7 options, rendered as a WhatsApp list
+    message).  Numeric input ``text='1'`` is verified to resolve to the first
+    option (``'Menor de 12'``) via 1-based index resolution.
+    """
+    PHONE_B = "5511111111111"  # Second session for the text-input path
+
+    # ------------------------------------------------------------------
+    # Path A — GENDER via button payload (opt_0 → "Mulher")
+    # ------------------------------------------------------------------
+    await send(engine, PHONE, text="Oi")                               # → GREETING
+    await send(engine, PHONE, button_id="opt_0", button_title="Sim")  # → WHO_FOR
+    await send(engine, PHONE, text="1")                                # → GENDER
+    assert engine._sessions[PHONE].current_step == Step.GENDER
+
+    gender_prompt_a = await send(engine, PHONE, button_id="opt_0", button_title="Mulher")
+
+    assert gender_prompt_a, "Expected a prompt after answering GENDER via button"
+    assert engine._sessions[PHONE].collected_data.get("gender") == "Mulher", (
+        f"Expected gender='Mulher' via button, got: {engine._sessions[PHONE].collected_data!r}"
+    )
+    assert engine._sessions[PHONE].current_step == Step.AGE_GROUP
+
+    # ------------------------------------------------------------------
+    # Path B — GENDER via plain text ("Mulher")
+    # ------------------------------------------------------------------
+    await send(engine, PHONE_B, text="Oi")                               # → GREETING
+    await send(engine, PHONE_B, button_id="opt_0", button_title="Sim")  # → WHO_FOR
+    await send(engine, PHONE_B, text="1")                                # → GENDER
+    assert engine._sessions[PHONE_B].current_step == Step.GENDER
+
+    gender_prompt_b = await send(engine, PHONE_B, text="Mulher")
+
+    assert gender_prompt_b, "Expected a prompt after answering GENDER via text"
+    assert engine._sessions[PHONE_B].collected_data.get("gender") == "Mulher", (
+        f"Expected gender='Mulher' via text, got: {engine._sessions[PHONE_B].collected_data!r}"
+    )
+    assert engine._sessions[PHONE_B].current_step == Step.AGE_GROUP
+
+    # Both paths must resolve to the same canonical stored value
+    assert (
+        engine._sessions[PHONE].collected_data["gender"]
+        == engine._sessions[PHONE_B].collected_data["gender"]
+    ), "Button and text inputs for GENDER must resolve to the same stored value"
+
+    # ------------------------------------------------------------------
+    # List step — AGE_GROUP via numeric index (text='1' → "Menor de 12")
+    # ------------------------------------------------------------------
+    # Continue Path A which is already waiting at AGE_GROUP
+    age_prompt = await send(engine, PHONE, text="1")  # index 1 → options[0] = "Menor de 12"
+
+    assert age_prompt, "Expected a prompt after answering AGE_GROUP via numeric index"
+    assert engine._sessions[PHONE].collected_data.get("age_group") == "Menor de 12", (
+        f"Numeric '1' should resolve to 'Menor de 12', "
+        f"got: {engine._sessions[PHONE].collected_data.get('age_group')!r}"
+    )
+    assert engine._sessions[PHONE].current_step == Step.CITY
