@@ -36,6 +36,28 @@ const ROUTES = [
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Pass 3: dedup advisory (advisory only — never exits 2)
+function extractFunctionNames(content) {
+  const names = new Set();
+  const patterns = [
+    /(?:^|\s)(?:async\s+)?function\s+(\w{3,})\s*\(/gm,
+    /(?:^|\s)(?:const|let|var)\s+(\w{3,})\s*=\s*(?:async\s+)?\(/gm,
+    /(?:^|\s)(?:const|let|var)\s+(\w{3,})\s*=\s*(?:async\s+)?function/gm,
+    /^\s*(?:async\s+)?(\w{3,})\s*\([^)]*\)\s*(?::\s*\w+\s*)?\{/gm,  // class methods / Python-style
+    /^def\s+(\w{3,})\s*\(/gm,  // Python
+  ];
+  for (const pat of patterns) {
+    let m;
+    while ((m = pat.exec(content)) !== null) {
+      const name = m[1];
+      if (name && !['const', 'let', 'var', 'async', 'function', 'return', 'if', 'for', 'while'].includes(name)) {
+        names.add(name);
+      }
+    }
+  }
+  return [...names];
+}
+
 function stripRoot(absPath) {
   const prefix = projectRoot.endsWith('/') ? projectRoot : projectRoot + '/';
   return absPath.startsWith(prefix) ? absPath.slice(prefix.length) : absPath;
@@ -82,6 +104,21 @@ function main() {
       if (existsSync(abs)) {
         messages.push(readFileSync(abs, 'utf8'));
       }
+    }
+  }
+
+  // Pass 3: dedup advisory (advisory only — never exits 2)
+  const newContent = input.tool_input?.content || input.tool_input?.new_string || '';
+  const oldContent = input.tool_input?.old_string || '';
+  if (newContent) {
+    const newNames = extractFunctionNames(newContent);
+    const oldNames = new Set(extractFunctionNames(oldContent));
+    const addedNames = newNames.filter(n => !oldNames.has(n));
+    if (addedNames.length > 0) {
+      messages.push(
+        `[dedup-check] New function(s) detected: ${addedNames.join(', ')}\n` +
+        `Before implementing, verify no existing version: grep -r "${addedNames[0]}" src/ (or equivalent)`
+      );
     }
   }
 
